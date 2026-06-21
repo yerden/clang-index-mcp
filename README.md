@@ -110,6 +110,32 @@ testdata/
   fixture/              tiny C project for integration tests
 ```
 
+## Possible directions
+
+Sketches, not commitments — captured here so the design tradeoffs aren't re-litigated each time the topic comes up.
+
+### Source-tree file watching
+
+Today the daemon only watches `compile_commands.json`; source edits don't refresh the served DB until the next compdb event. A natural extension is to add a second fsnotify watcher over the project tree — every modify/create/delete on a `.c`/`.cpp`/`.h` would pulse the same debounced `Daemon.Restart()` we already use for compdb changes. Per-file extraction cache and clangd's `--background-index-path` shards both ensure unchanged TUs aren't re-extracted, so a single source edit costs one TU's worth of clangd work, not a full reindex. Trade-off: header edits invalidate broadly (the per-file cache key intentionally doesn't track transitive includes, §7.2), and editor save-storms during refactors would cause restart churn; the existing 5 s debounce (§6.1) is the lever to tune. Status quo workaround: re-run the build system to regenerate `compile_commands.json`.
+
+### Function-pointer-aware call edges
+
+`call_edges` today only carries what clangd's `callHierarchy/outgoingCalls` returns — direct calls plus a fragile by-accident edge when a function pointer is passed as a literal at the call site (e.g. `dispatch(square, x)` produces `tu1_indirect → square`). The moment the pointer is wrapped in a variable, a struct field, or a dispatch table, the edge disappears and AI traversal hits a dead end at any dispatcher.
+
+A reasonable closing of this gap, in tiers:
+
+| tier | what it adds | cost |
+|---|---|---|
+| current | direct calls + literal-at-call-site as one edge kind | none |
+| **address-taken × indirect-call sites**, type-narrowed | for every function whose address is taken anywhere (discoverable via `textDocument/references`) and every call site through a function-pointer-typed argument, synthesize an edge tagged `edge_kind = "indirect"`. Sound over-approximation, type-narrowed to cut noise. | one extra LSP query per function, one new schema column, MCP tools gain an "include indirect" flag |
+| true value-flow / points-to | precise edges per call site | substantial — needs a real analyzer (clang static analyzer, libclang AST walk), out of scope for an LSP-driven indexer |
+
+Tier 2 is the sweet spot. It would let an AI agent traverse `entrypoint → dispatch → square` even when `square` is registered into a dispatch table elsewhere, at the cost of false-positive edges between dispatchers and any same-typed address-taken function. The schema migration is a single `edge_kind TEXT` column on `call_edges` plus an index; `get_symbol` / `search_symbol` would learn an `include_indirect` option so the default stays conservative.
+
+### Cache invalidation on header edits
+
+The per-file cache's documented blind spot (§7.2): editing a shared header is invisible to its `(content, command)` key, so cached TUs serve stale results. The architectural answer is manual nuke. A modest improvement would be to extend the key with a digest of *each TU's actual transitive header set*, computed once at extract time via `clang -MM` or by capturing `textDocument/documentLink` from clangd. Trade-off: this reimplements (poorly) what clangd's background-index dependency tracking already does internally; the architecture (§7.2) explicitly chose not to.
+
 ## Status
 
 Early. The fixture-based integration tests pass against clangd 19; the architecture document calls out the policy around clangd version pinning (§6.4) and the known caveats around the per-file cache and indirect-call resolution.
