@@ -15,6 +15,9 @@ Both expose the same MCP tools, so assistants don't need to know which mode is b
 
 - `search_symbol(query, limit?)` — FTS5 full-text search over symbol name and signature.
 - `get_symbol(id)` — fetch a symbol with its direct callers and callees.
+- `list_symbols_in_file(file, limit?)` — list every symbol declared *or* defined in a file. Useful for "what's the public surface of `foo.h`?" — matches either the declaration file (typically the header) or the definition file (typically the `.c`).
+
+Symbol records carry both a definition location (`File`/`Line`) and a declaration location (`DeclFile`/`DeclLine`). For static / file-local symbols, declaration and definition coincide and `DeclFile` is empty.
 
 Both transports — **stdio** and **Streamable HTTP** (2025-03 spec, single endpoint) — are supported by every binary.
 

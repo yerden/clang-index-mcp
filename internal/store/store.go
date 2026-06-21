@@ -58,12 +58,19 @@ func q(name string) string {
 
 // Symbol is one row of the symbols table, hydrated for callers.
 type Symbol struct {
-	ID        int64
-	USR       string
-	Name      string
-	Kind      string
-	File      string // relative to ProjectRoot, see architecture §5.2
-	Line      int
+	ID   int64
+	USR  string
+	Name string
+	Kind string
+	// File / Line — definition location (the .c/.cpp/.m file holding the body).
+	// Relative to ProjectRoot per architecture §5.2.
+	File string
+	Line int
+	// DeclFile / DeclLine — declaration location (typically the header).
+	// Empty / 0 when the declaration coincides with the definition (e.g.
+	// a static function defined and used in one TU).
+	DeclFile  string
+	DeclLine  int
 	Signature string
 }
 
@@ -145,7 +152,7 @@ func WriteIndex(path string, symbols []Symbol, edges []Edge) error {
 	usrToID := make(map[string]int64, len(symbols))
 	for _, sym := range symbols {
 		var id int64
-		if err := insSym.QueryRow(sym.USR, sym.Name, sym.Kind, sym.File, sym.Line, sym.Signature).Scan(&id); err != nil {
+		if err := insSym.QueryRow(sym.USR, sym.Name, sym.Kind, sym.File, sym.Line, sym.DeclFile, sym.DeclLine, sym.Signature).Scan(&id); err != nil {
 			return fmt.Errorf("insert symbol %q: %w", sym.USR, err)
 		}
 		usrToID[sym.USR] = id
@@ -258,8 +265,25 @@ type rowScanner interface {
 
 func scanSymbol(r rowScanner) (Symbol, error) {
 	var s Symbol
-	err := r.Scan(&s.ID, &s.USR, &s.Name, &s.Kind, &s.File, &s.Line, &s.Signature)
+	err := r.Scan(&s.ID, &s.USR, &s.Name, &s.Kind, &s.File, &s.Line, &s.DeclFile, &s.DeclLine, &s.Signature)
 	return s, err
+}
+
+// ListSymbolsInFile returns all symbols whose declaration file or
+// definition file matches path. Path is matched exactly against
+// symbols.decl_file / symbols.file — callers must pass the same
+// repo-relative form used at write time.
+func (s *Store) ListSymbolsInFile(path string, limit int) ([]Symbol, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	db := s.db.Load()
+	rows, err := db.Query(q("list_symbols_in_file"), path, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanSymbols(rows)
 }
 
 func scanSymbols(rows *sql.Rows) ([]Symbol, error) {

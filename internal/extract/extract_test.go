@@ -52,6 +52,44 @@ func TestCompDBAbsFile(t *testing.T) {
 	}
 }
 
+func TestExtractSignatureFromHover_PlaintextMarkup(t *testing.T) {
+	body := []byte(`{"kind":"plaintext","value":"function dispatch\n\nprovided by \"shared.h\"\n\n→ int\n\nParameters:\n\n- op_t fn (aka int (*)(int))\n- int x\n\nint dispatch(op_t fn, int x)"}`)
+	got := extractSignatureFromHover(body)
+	want := "int dispatch(op_t fn, int x)"
+	if got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+}
+
+func TestExtractSignatureFromHover_MarkdownWithCodeFence(t *testing.T) {
+	body := []byte(`{"kind":"markdown","value":"### function foo\n\n` + "```" + `cpp\nint foo(int x);\n` + "```" + `"}`)
+	got := extractSignatureFromHover(body)
+	want := "int foo(int x)"
+	if got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+}
+
+func TestExtractSignatureFromHover_MarkedStringArray(t *testing.T) {
+	body := []byte(`[{"language":"cpp","value":"int foo(int x)"}, "// trailing prose"]`)
+	got := extractSignatureFromHover(body)
+	// The last item is plain prose; the first contained the signature.
+	// We take the last non-empty line per item then keep the most recent one.
+	want := "// trailing prose"
+	if got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+}
+
+func TestExtractSignatureFromHover_Empty(t *testing.T) {
+	if got := extractSignatureFromHover(nil); got != "" {
+		t.Fatalf("nil → %q want empty", got)
+	}
+	if got := extractSignatureFromHover([]byte(`""`)); got != "" {
+		t.Fatalf("empty string → %q want empty", got)
+	}
+}
+
 func TestRelative(t *testing.T) {
 	if got := relative("/work", "/work/sub/a.c"); got != "sub/a.c" {
 		t.Fatalf("got %q", got)

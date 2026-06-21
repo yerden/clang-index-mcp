@@ -3,10 +3,13 @@ CREATE TABLE symbols (
   usr       TEXT UNIQUE,
   name      TEXT,
   kind      TEXT,
-  file      TEXT,
-  line      INTEGER,
+  file      TEXT,    -- definition location, relative to ProjectRoot
+  line      INTEGER, -- definition line, 1-based
+  decl_file TEXT,    -- declaration location (header), relative to ProjectRoot; "" if same as file
+  decl_line INTEGER, -- declaration line, 1-based; 0 if same as line
   signature TEXT
 );
+CREATE INDEX idx_decl_file ON symbols(decl_file);
 
 CREATE VIRTUAL TABLE symbols_fts USING fts5(
   name, signature, content='symbols', content_rowid='id',

@@ -48,7 +48,7 @@ Dependency map:
 8. **`symbols.file` is relative to `ProjectRoot`** (§5.2). Don't store absolute paths; the artifact must be portable across build and serve environments.
 
 ### Caching
-9. **Per-file cache key is `(file content digest, command digest)` over raw bytes — no normalization** (§7.2). Don't add whitespace stripping or sorting. The known gap (transitive header changes invisible to the key) is accepted; don't try to close it. Manual nuke is the documented fallback.
+9. **Per-file cache key is `(file content digest, command digest)` over raw bytes — no normalization** (§7.2). Don't add whitespace stripping or sorting. The known gap (transitive header changes invisible to the key) is accepted; don't try to close it. Manual nuke is the documented fallback. Same applies after a schema/extraction change: a cached `tuPayload` from before today's run reflects the old extraction shape (e.g. missing `decl_file`, empty signatures); nuke the per-file cache directory after such changes.
 10. **Whole-build cache lookup must include every file referenced by the compdb**, not just the TUs. `cmd/clang-index/main.go` does this. If you change the compdb walker, keep the input-digest input set in sync.
 
 ### Daemon

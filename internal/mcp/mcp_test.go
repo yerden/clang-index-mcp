@@ -14,8 +14,9 @@ func newTestServer(t *testing.T) *Server {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "ix.db")
 	syms := []store.Symbol{
-		{USR: "u1", Name: "alpha", Kind: "Function", File: "a.c", Line: 1, Signature: "void alpha()"},
-		{USR: "u2", Name: "beta", Kind: "Function", File: "a.c", Line: 5, Signature: "void beta()"},
+		{USR: "u1", Name: "alpha", Kind: "Function", File: "a.c", Line: 1, DeclFile: "api.h", DeclLine: 2, Signature: "void alpha()"},
+		{USR: "u2", Name: "beta", Kind: "Function", File: "a.c", Line: 5, DeclFile: "api.h", DeclLine: 7, Signature: "void beta()"},
+		{USR: "u3", Name: "gamma", Kind: "Function", File: "b.c", Line: 1, Signature: "static void gamma()"},
 	}
 	edges := []store.Edge{{CallerUSR: "u1", CalleeUSR: "u2"}}
 	if err := store.WriteIndex(path, syms, edges); err != nil {
@@ -105,6 +106,31 @@ func TestGetSymbolTool(t *testing.T) {
 	}
 	if !jsonContains(resp, `\"callees\"`) || !jsonContains(resp, `\"callers\"`) {
 		t.Fatalf("get_symbol missing edges: %s", resp)
+	}
+}
+
+func TestListSymbolsInFileTool(t *testing.T) {
+	srv := newTestServer(t)
+	// Query the header — should return alpha and beta but not gamma.
+	req := `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"list_symbols_in_file","arguments":{"file":"api.h"}}}`
+	resp, err := srv.HandleSingleMessage(context.Background(), []byte(req))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"alpha", "beta"} {
+		if !jsonContains(resp, name) {
+			t.Errorf("list_symbols_in_file(api.h) missing %q: %s", name, resp)
+		}
+	}
+	if jsonContains(resp, "gamma") {
+		t.Errorf("list_symbols_in_file(api.h) shouldn't include gamma (declared elsewhere): %s", resp)
+	}
+
+	// Query a .c file — should also match by definition file.
+	req = `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"list_symbols_in_file","arguments":{"file":"b.c"}}}`
+	resp, _ = srv.HandleSingleMessage(context.Background(), []byte(req))
+	if !jsonContains(resp, "gamma") {
+		t.Errorf("list_symbols_in_file(b.c) missing gamma: %s", resp)
 	}
 }
 

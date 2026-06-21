@@ -104,6 +104,37 @@ func TestSystemFixture(t *testing.T) {
 		}
 	}
 
+	// Every callable symbol must have a non-empty signature. Regression
+	// guard for gap #2: callees discovered via callHierarchy used to be
+	// inserted with Signature="", silently breaking FTS5 parameter-type
+	// searches; both the documentSymbol path and the callee path now
+	// fall back to textDocument/hover.
+	for _, s := range res.Symbols {
+		if s.Kind == "Function" && s.Signature == "" {
+			t.Errorf("function %q has empty signature; gap #2 regression", s.Name)
+		}
+	}
+
+	// Gap #1: symbols declared in a header should carry decl_file
+	// pointing at that header, even when their definition lives in a .c.
+	// shared_hi is the canonical case in the fixture: declared in
+	// include/shared.h, defined in shared.c.
+	for _, s := range res.Symbols {
+		if s.Name == "shared_hi" {
+			if s.DeclFile != "include/shared.h" {
+				t.Errorf("shared_hi.DeclFile = %q, want include/shared.h", s.DeclFile)
+			}
+			if s.File != "shared.c" {
+				t.Errorf("shared_hi.File = %q, want shared.c", s.File)
+			}
+		}
+		// A file-local (static) symbol like `square` should have an empty
+		// DeclFile because there is no separate declaration.
+		if s.Name == "square" && s.DeclFile != "" {
+			t.Errorf("static square should have empty DeclFile, got %q", s.DeclFile)
+		}
+	}
+
 	// shared_hi should appear once (cross-TU USR dedup, architecture §11).
 	hits := 0
 	var sharedHiUSR string

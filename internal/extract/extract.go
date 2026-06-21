@@ -253,13 +253,22 @@ func extractTU(ctx context.Context, cli *lsp.Client, absFile, projectRoot string
 		}
 		if !seen[usr] {
 			seen[usr] = true
+			sig := ds.Detail
+			if !looksLikeSignature(sig, ds.Name) {
+				if hsig := hoverSignature(ctx, cli, uri, ds.SelectionRange.Start); hsig != "" {
+					sig = hsig
+				}
+			}
+			declFile, declLine := declarationLocation(ctx, cli, uri, ds.SelectionRange.Start, absFile, ds.SelectionRange.Start.Line+1, projectRoot)
 			out.Symbols = append(out.Symbols, store.Symbol{
 				USR:       usr,
 				Name:      ds.Name,
 				Kind:      kindName(ds.Kind),
 				File:      relative(projectRoot, absFile),
 				Line:      ds.SelectionRange.Start.Line + 1,
-				Signature: ds.Detail,
+				DeclFile:  declFile,
+				DeclLine:  declLine,
+				Signature: sig,
 			})
 		}
 
@@ -279,12 +288,17 @@ func extractTU(ctx context.Context, cli *lsp.Client, absFile, projectRoot string
 			}
 			if !seen[calleeUSR] {
 				seen[calleeUSR] = true
+				calleeAbs := uriToPath(callee.URI)
+				declFile, declLine := declarationLocation(ctx, cli, callee.URI, callee.Pos, calleeAbs, callee.Pos.Line+1, projectRoot)
 				out.Symbols = append(out.Symbols, store.Symbol{
-					USR:  calleeUSR,
-					Name: callee.Name,
-					Kind: callee.Kind,
-					File: relative(projectRoot, uriToPath(callee.URI)),
-					Line: callee.Pos.Line + 1,
+					USR:       calleeUSR,
+					Name:      callee.Name,
+					Kind:      callee.Kind,
+					File:      relative(projectRoot, calleeAbs),
+					Line:      callee.Pos.Line + 1,
+					DeclFile:  declFile,
+					DeclLine:  declLine,
+					Signature: hoverSignature(ctx, cli, callee.URI, callee.Pos),
 				})
 			}
 			out.Edges = append(out.Edges, store.Edge{CallerUSR: usr, CalleeUSR: calleeUSR})
@@ -384,6 +398,176 @@ func decodeDocumentSymbols(raw json.RawMessage, uri string) ([]flatDocumentSymbo
 		})
 	}
 	return out, nil
+}
+
+// looksLikeSignature accepts clangd's documentSymbol detail field if
+// it's substantive enough to keep — defined here as "non-empty and
+// containing the symbol's name." Bare parameter-list shapes like
+// "int (FILE *, char *, size_t)" pass; anonymous or stripped details
+// don't, so we drop down to hover.
+func looksLikeSignature(detail, name string) bool {
+	if detail == "" {
+		return false
+	}
+	// detail forms like "int (int)" don't contain the name; accept them
+	// anyway since they're informative for parameter-type queries.
+	return true
+}
+
+// hoverSignature returns the canonical declaration line for the symbol
+// at uri+pos, parsed from clangd's textDocument/hover. Returns "" on
+// any failure — callers fall back to whatever they had.
+//
+// clangd's hover content is plaintext with the C/C++ declaration on a
+// trailing line, after blank-separated metadata blocks (return type,
+// parameters, docstring). Taking the last non-empty line is robust:
+// even older clangd builds that omit the metadata still put the
+// declaration there.
+func hoverSignature(ctx context.Context, cli *lsp.Client, uri string, pos Position) string {
+	raw, err := cli.Call(ctx, "textDocument/hover", map[string]any{
+		"textDocument": map[string]any{"uri": uri},
+		"position":     pos,
+	})
+	if err != nil || len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var resp struct {
+		Contents json.RawMessage `json:"contents"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return ""
+	}
+	return extractSignatureFromHover(resp.Contents)
+}
+
+// extractSignatureFromHover decodes clangd's hover `contents` (which
+// may be MarkupContent, MarkedString, or MarkedString[]) and returns
+// the trailing declaration line.
+func extractSignatureFromHover(contents json.RawMessage) string {
+	if len(contents) == 0 {
+		return ""
+	}
+	// MarkupContent: {kind, value}
+	var markup struct {
+		Kind  string `json:"kind"`
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal(contents, &markup); err == nil && markup.Value != "" {
+		return trailingNonEmptyLine(markup.Value)
+	}
+	// MarkedString[]
+	var arr []json.RawMessage
+	if err := json.Unmarshal(contents, &arr); err == nil {
+		var last string
+		for _, item := range arr {
+			var ms struct {
+				Language string `json:"language"`
+				Value    string `json:"value"`
+			}
+			if err := json.Unmarshal(item, &ms); err == nil && ms.Value != "" {
+				last = trailingNonEmptyLine(ms.Value)
+				continue
+			}
+			var s string
+			if err := json.Unmarshal(item, &s); err == nil && s != "" {
+				last = trailingNonEmptyLine(s)
+			}
+		}
+		return last
+	}
+	// Bare MarkedString (plain string)
+	var s string
+	if err := json.Unmarshal(contents, &s); err == nil {
+		return trailingNonEmptyLine(s)
+	}
+	return ""
+}
+
+func trailingNonEmptyLine(s string) string {
+	var last string
+	for line := range strings.SplitSeq(s, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// Skip markdown code fences.
+		if strings.HasPrefix(line, "```") {
+			continue
+		}
+		last = line
+	}
+	return strings.TrimSuffix(last, ";")
+}
+
+// declarationLocation queries textDocument/declaration to find where
+// the symbol at uri+pos is *declared* (typically a header) as opposed
+// to *defined* (where we already are, at defAbsPath:defLine). When the
+// declaration coincides with the definition — e.g. a static function
+// defined and used in one TU, or any symbol without a forward declaration
+// — we return ("", 0) so downstream code can treat that as "no separate
+// declaration location."
+//
+// LSP textDocument/declaration may return null, a single Location, an
+// array of Locations, or LocationLink[]. We handle all three shapes;
+// the first usable location wins.
+func declarationLocation(ctx context.Context, cli *lsp.Client, uri string, pos Position, defAbsPath string, defLine int, projectRoot string) (string, int) {
+	raw, err := cli.Call(ctx, "textDocument/declaration", map[string]any{
+		"textDocument": map[string]any{"uri": uri},
+		"position":     pos,
+	})
+	if err != nil || len(raw) == 0 || string(raw) == "null" {
+		return "", 0
+	}
+	declURI, declLine, ok := decodeLocationResult(raw)
+	if !ok {
+		return "", 0
+	}
+	declAbs := uriToPath(declURI)
+	if declAbs == defAbsPath && declLine == defLine {
+		return "", 0
+	}
+	return relative(projectRoot, declAbs), declLine
+}
+
+// decodeLocationResult handles the LSP "go-to-X" result polymorphism:
+// Location | Location[] | LocationLink[] | null. Returns the first
+// resolvable (uri, line) pair, with line 1-based.
+func decodeLocationResult(raw json.RawMessage) (uri string, line int, ok bool) {
+	// Single Location: {uri, range}
+	var single struct {
+		URI   string `json:"uri"`
+		Range Range  `json:"range"`
+	}
+	if err := json.Unmarshal(raw, &single); err == nil && single.URI != "" {
+		return single.URI, single.Range.Start.Line + 1, true
+	}
+	// Array — either Location[] or LocationLink[].
+	var arr []json.RawMessage
+	if err := json.Unmarshal(raw, &arr); err != nil || len(arr) == 0 {
+		return "", 0, false
+	}
+	for _, item := range arr {
+		var loc struct {
+			URI   string `json:"uri"`
+			Range Range  `json:"range"`
+		}
+		if err := json.Unmarshal(item, &loc); err == nil && loc.URI != "" {
+			return loc.URI, loc.Range.Start.Line + 1, true
+		}
+		var link struct {
+			TargetURI            string `json:"targetUri"`
+			TargetRange          Range  `json:"targetRange"`
+			TargetSelectionRange Range  `json:"targetSelectionRange"`
+		}
+		if err := json.Unmarshal(item, &link); err == nil && link.TargetURI != "" {
+			start := link.TargetSelectionRange.Start
+			if start == (Position{}) {
+				start = link.TargetRange.Start
+			}
+			return link.TargetURI, start.Line + 1, true
+		}
+	}
+	return "", 0, false
 }
 
 // symbolUSR uses clangd's textDocument/symbolInfo extension to recover

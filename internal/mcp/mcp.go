@@ -68,6 +68,19 @@ func (s *Server) registerTools() {
 		),
 		s.handleGetSymbol,
 	)
+	s.mcp.AddTool(
+		mcplib.NewTool("list_symbols_in_file",
+			mcplib.WithDescription("List all symbols declared or defined in a given file (typically a header). Use to answer 'what's the public API of this header' / 'what's declared in xxx.h'."),
+			mcplib.WithString("file",
+				mcplib.Required(),
+				mcplib.Description("Repo-relative path; matched exactly against either decl_file or file (definition)."),
+			),
+			mcplib.WithNumber("limit",
+				mcplib.Description("Maximum results (default 200)."),
+			),
+		),
+		s.handleListSymbolsInFile,
+	)
 }
 
 func (s *Server) handleSearchSymbol(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
@@ -83,6 +96,23 @@ func (s *Server) handleSearchSymbol(ctx context.Context, req mcplib.CallToolRequ
 	hits, err := s.store.SearchSymbol(query, limit)
 	if err != nil {
 		return mcplib.NewToolResultError("search_symbol: " + err.Error()), nil
+	}
+	return jsonResult(hits)
+}
+
+func (s *Server) handleListSymbolsInFile(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+	args := req.GetArguments()
+	file, ok := args["file"].(string)
+	if !ok || file == "" {
+		return mcplib.NewToolResultError("file is required and must be a string"), nil
+	}
+	limit := 200
+	if v, ok := args["limit"].(float64); ok {
+		limit = int(v)
+	}
+	hits, err := s.store.ListSymbolsInFile(file, limit)
+	if err != nil {
+		return mcplib.NewToolResultError("list_symbols_in_file: " + err.Error()), nil
 	}
 	return jsonResult(hits)
 }
