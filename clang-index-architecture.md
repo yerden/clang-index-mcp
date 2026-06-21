@@ -24,13 +24,19 @@ serve time. Read-only.
 
 ### Dynamic (live daemon)
 A long-running process managing a real clangd instance bound to a specific
-working directory and compile_commands.json, continuously rebuilding the
-index as the tree changes — including in-progress, unsaved-elsewhere edits.
+working directory and compile_commands.json, rebuilding the index whenever
+compile_commands.json itself changes (debounced — see §6.1). Source-file
+edits are not watched directly; the expected workflow is that the build
+system regenerates compile_commands.json as part of its own cycle and the
+daemon picks that up. clangd's background indexer still reacts to
+individual file edits internally, but the SQLite snapshot served over MCP
+is only refreshed on a compdb event.
 
 These modes are deliberately not unified into one process. The static
 mode's value is reproducibility and cheapness; the dynamic mode's value is
-reflecting state that exists nowhere else. Forcing them into one
-long-running process would blur both guarantees.
+tracking a live tree without manual rebuild steps between compdb
+regenerations. Forcing them into one long-running process would blur both
+guarantees.
 
 ## 3. Binaries
 
