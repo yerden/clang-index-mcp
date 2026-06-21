@@ -55,9 +55,15 @@ type Result struct {
 }
 
 // tuPayload is the JSON shape we round-trip through PerFile cache.
+// IndirectSites and AddressTaken feed the Tier 2 indirect-call edge
+// synthesis (architecture §6.5); they're per-TU because the AST query
+// they're derived from is per-TU, but the synthesis itself is whole-
+// build to support cross-TU function-pointer dispatch.
 type tuPayload struct {
-	Symbols []store.Symbol `json:"symbols"`
-	Edges   []store.Edge   `json:"edges"`
+	Symbols        []store.Symbol    `json:"symbols"`
+	Edges          []store.Edge      `json:"edges"`
+	IndirectSites  []indirectSite    `json:"indirect_sites,omitempty"`
+	AddressTaken   []addressTakenRef `json:"address_taken,omitempty"`
 }
 
 // Run walks the compdb, queries clangd for each TU, and returns the
@@ -134,6 +140,8 @@ func Run(ctx context.Context, cli *lsp.Client, opts Options) (*Result, error) {
 	symbolsByUSR := map[string]store.Symbol{}
 	edgeSet := map[string]struct{}{}
 	var edges []store.Edge
+	var indirectSites []indirectSite
+	var addressTaken []addressTakenRef
 
 	addPayload := func(p *tuPayload) {
 		for _, s := range p.Symbols {
@@ -150,13 +158,18 @@ func Run(ctx context.Context, cli *lsp.Client, opts Options) (*Result, error) {
 			if e.CallerUSR == "" || e.CalleeUSR == "" {
 				continue
 			}
-			k := e.CallerUSR + "\x00" + e.CalleeUSR
+			if e.Kind == "" {
+				e.Kind = store.EdgeDirect
+			}
+			k := e.CallerUSR + "\x00" + e.CalleeUSR + "\x00" + e.Kind
 			if _, dup := edgeSet[k]; dup {
 				continue
 			}
 			edgeSet[k] = struct{}{}
 			edges = append(edges, e)
 		}
+		indirectSites = append(indirectSites, p.IndirectSites...)
+		addressTaken = append(addressTaken, p.AddressTaken...)
 	}
 
 	for _, plan := range plans {
@@ -173,6 +186,27 @@ func Run(ctx context.Context, cli *lsp.Client, opts Options) (*Result, error) {
 			_ = opts.PerFile.Put(plan.key, &cache.PerFileEntry{Payload: b})
 		}
 		addPayload(payload)
+	}
+
+	// Tier 2 synthesis: cross-TU pairing of indirect-call sites with
+	// address-taken functions. We pair only after all TUs are processed
+	// so that a call site in TU A can find a matching address-take in
+	// TU B (architecture §6.5).
+	for _, ie := range synthesizeIndirectEdges(indirectSites, addressTaken) {
+		if _, ok := symbolsByUSR[ie.Caller]; !ok {
+			continue
+		}
+		if _, ok := symbolsByUSR[ie.Callee]; !ok {
+			continue
+		}
+		k := ie.Caller + "\x00" + ie.Callee + "\x00" + store.EdgeIndirect
+		if _, dup := edgeSet[k]; dup {
+			continue
+		}
+		edgeSet[k] = struct{}{}
+		edges = append(edges, store.Edge{
+			CallerUSR: ie.Caller, CalleeUSR: ie.Callee, Kind: store.EdgeIndirect,
+		})
 	}
 
 	out := &Result{Edges: edges}
@@ -242,6 +276,34 @@ func extractTU(ctx context.Context, cli *lsp.Client, absFile, projectRoot string
 		return nil, err
 	}
 
+	// Build a map of top-level function names → their identifier
+	// SelectionRange.Start. AST nodes carry a Detail equal to the
+	// symbol name but the Range covers the whole declaration; without
+	// this map we can't recover the precise name position needed to
+	// resolve a USR via symbolInfo (which only answers when the
+	// position lies on the identifier token).
+	nameToNamePos := make(map[string]Position, len(docSyms))
+	for _, ds := range docSyms {
+		if isCallable(ds.Kind) {
+			if _, exists := nameToNamePos[ds.Name]; !exists {
+				nameToNamePos[ds.Name] = ds.SelectionRange.Start
+			}
+		}
+	}
+
+	// Tier 2 indirect-edge analysis (architecture §6.5) is best-effort:
+	// if clangd doesn't support textDocument/ast or the response is
+	// malformed, we skip it and leave IndirectSites/AddressTaken empty.
+	var indirectSites []indirectSite
+	var addressTaken []addressTakenRef
+	if root, _ := fetchAST(ctx, cli, uri); root != nil {
+		w := newWalker(ctx, cli, uri)
+		w.nameToNamePos = nameToNamePos
+		w.walk(*root, false)
+		indirectSites = w.indirect
+		addressTaken = w.addressTaken
+	}
+
 	out := &tuPayload{}
 	seen := map[string]bool{}
 
@@ -301,10 +363,12 @@ func extractTU(ctx context.Context, cli *lsp.Client, absFile, projectRoot string
 					Signature: hoverSignature(ctx, cli, callee.URI, callee.Pos),
 				})
 			}
-			out.Edges = append(out.Edges, store.Edge{CallerUSR: usr, CalleeUSR: calleeUSR})
+			out.Edges = append(out.Edges, store.Edge{CallerUSR: usr, CalleeUSR: calleeUSR, Kind: store.EdgeDirect})
 		}
 	}
 
+	out.IndirectSites = indirectSites
+	out.AddressTaken = addressTaken
 	return out, nil
 }
 

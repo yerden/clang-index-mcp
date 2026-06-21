@@ -18,7 +18,13 @@ CREATE VIRTUAL TABLE symbols_fts USING fts5(
 
 CREATE TABLE call_edges (
   caller_id INTEGER REFERENCES symbols(id),
-  callee_id INTEGER REFERENCES symbols(id)
+  callee_id INTEGER REFERENCES symbols(id),
+  -- 'direct'   = clangd-confirmed direct call, see callHierarchy.
+  -- 'indirect' = synthesized: an indirect call site of a function-pointer
+  --             type T inside the caller, paired with an address-taken
+  --             function of matching T. Sound over-approximation
+  --             (Andersen-style); see architecture §6.5.
+  edge_kind TEXT NOT NULL DEFAULT 'direct'
 );
-CREATE INDEX idx_caller ON call_edges(caller_id);
-CREATE INDEX idx_callee ON call_edges(callee_id);
+CREATE INDEX idx_caller ON call_edges(caller_id, edge_kind);
+CREATE INDEX idx_callee ON call_edges(callee_id, edge_kind);

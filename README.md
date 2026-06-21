@@ -14,10 +14,20 @@ Both expose the same MCP tools, so assistants don't need to know which mode is b
 ## MCP tools
 
 - `search_symbol(query, limit?)` — FTS5 full-text search over symbol name and signature.
-- `get_symbol(id)` — fetch a symbol with its direct callers and callees.
+- `get_symbol(id)` — fetch a symbol with its direct callers and callees. Each returned caller/callee carries an `EdgeKind` tag: `"direct"` (clangd-confirmed direct call) or `"indirect"` (synthesized function-pointer candidate — see below).
 - `list_symbols_in_file(file, limit?)` — list every symbol declared *or* defined in a file. Useful for "what's the public surface of `foo.h`?" — matches either the declaration file (typically the header) or the definition file (typically the `.c`).
 
 Symbol records carry both a definition location (`File`/`Line`) and a declaration location (`DeclFile`/`DeclLine`). For static / file-local symbols, declaration and definition coincide and `DeclFile` is empty.
+
+### Function-pointer / indirect-call edges
+
+`callHierarchy/outgoingCalls` only resolves direct calls — it stops dead at every function-pointer dispatcher (`fn(x)`). The extractor runs a separate AST pass over `textDocument/ast` (clangd 15+) to close the gap:
+
+- For each indirect call site `(G, T)` — a `CallExpr` whose callee isn't a direct `DeclRefExpr` — record the enclosing function `G` and the callee type `T`.
+- For each address-taken function `(F, T_F)` — a `DeclRefExpr` to a function outside any direct-call callee slot — record the function `F` and the function-pointer type.
+- Synthesize `G --indirect--> F` for every pair where `T == T_F`.
+
+The result is a sound over-approximation: if a dispatcher takes a function pointer of type `int (*)(int)`, *every* function with a matching signature whose address is taken anywhere in the project gets an indirect edge from that dispatcher. AI agents can choose to traverse only direct edges (precise but blind to dispatchers) or include indirect ones (complete but noisier). See [architecture §6.5](clang-index-architecture.md#65-function-pointer--indirect-call-edges-tier-2) for the design and what's intentionally left out (per-call-site value-flow).
 
 Both transports — **stdio** and **Streamable HTTP** (2025-03 spec, single endpoint) — are supported by every binary.
 
@@ -117,20 +127,6 @@ Sketches, not commitments — captured here so the design tradeoffs aren't re-li
 ### Source-tree file watching
 
 Today the daemon only watches `compile_commands.json`; source edits don't refresh the served DB until the next compdb event. A natural extension is to add a second fsnotify watcher over the project tree — every modify/create/delete on a `.c`/`.cpp`/`.h` would pulse the same debounced `Daemon.Restart()` we already use for compdb changes. Per-file extraction cache and clangd's `--background-index-path` shards both ensure unchanged TUs aren't re-extracted, so a single source edit costs one TU's worth of clangd work, not a full reindex. Trade-off: header edits invalidate broadly (the per-file cache key intentionally doesn't track transitive includes, §7.2), and editor save-storms during refactors would cause restart churn; the existing 5 s debounce (§6.1) is the lever to tune. Status quo workaround: re-run the build system to regenerate `compile_commands.json`.
-
-### Function-pointer-aware call edges
-
-`call_edges` today only carries what clangd's `callHierarchy/outgoingCalls` returns — direct calls plus a fragile by-accident edge when a function pointer is passed as a literal at the call site (e.g. `dispatch(square, x)` produces `tu1_indirect → square`). The moment the pointer is wrapped in a variable, a struct field, or a dispatch table, the edge disappears and AI traversal hits a dead end at any dispatcher.
-
-A reasonable closing of this gap, in tiers:
-
-| tier | what it adds | cost |
-|---|---|---|
-| current | direct calls + literal-at-call-site as one edge kind | none |
-| **address-taken × indirect-call sites**, type-narrowed | for every function whose address is taken anywhere (discoverable via `textDocument/references`) and every call site through a function-pointer-typed argument, synthesize an edge tagged `edge_kind = "indirect"`. Sound over-approximation, type-narrowed to cut noise. | one extra LSP query per function, one new schema column, MCP tools gain an "include indirect" flag |
-| true value-flow / points-to | precise edges per call site | substantial — needs a real analyzer (clang static analyzer, libclang AST walk), out of scope for an LSP-driven indexer |
-
-Tier 2 is the sweet spot. It would let an AI agent traverse `entrypoint → dispatch → square` even when `square` is registered into a dispatch table elsewhere, at the cost of false-positive edges between dispatchers and any same-typed address-taken function. The schema migration is a single `edge_kind TEXT` column on `call_edges` plus an index; `get_symbol` / `search_symbol` would learn an `include_indirect` option so the default stays conservative.
 
 ### Cache invalidation on header edits
 

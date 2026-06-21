@@ -18,7 +18,10 @@ func newTestServer(t *testing.T) *Server {
 		{USR: "u2", Name: "beta", Kind: "Function", File: "a.c", Line: 5, DeclFile: "api.h", DeclLine: 7, Signature: "void beta()"},
 		{USR: "u3", Name: "gamma", Kind: "Function", File: "b.c", Line: 1, Signature: "static void gamma()"},
 	}
-	edges := []store.Edge{{CallerUSR: "u1", CalleeUSR: "u2"}}
+	edges := []store.Edge{
+		{CallerUSR: "u1", CalleeUSR: "u2", Kind: store.EdgeDirect},
+		{CallerUSR: "u3", CalleeUSR: "u1", Kind: store.EdgeIndirect},
+	}
 	if err := store.WriteIndex(path, syms, edges); err != nil {
 		t.Fatal(err)
 	}
@@ -106,6 +109,15 @@ func TestGetSymbolTool(t *testing.T) {
 	}
 	if !jsonContains(resp, `\"callees\"`) || !jsonContains(resp, `\"callers\"`) {
 		t.Fatalf("get_symbol missing edges: %s", resp)
+	}
+	// Each caller/callee row carries an EdgeKind tag so AI consumers can
+	// distinguish a clangd-confirmed direct call from a Tier 2
+	// synthesized indirect-call candidate (architecture §6.5).
+	if !jsonContains(resp, `\"EdgeKind\":\"direct\"`) {
+		t.Fatalf("get_symbol response should mark direct edges: %s", resp)
+	}
+	if !jsonContains(resp, `\"EdgeKind\":\"indirect\"`) {
+		t.Fatalf("get_symbol response should mark synthesized indirect edges: %s", resp)
 	}
 }
 

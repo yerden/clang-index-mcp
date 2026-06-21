@@ -174,6 +174,50 @@ always documented precisely. Pin a specific release:
   re-verify §6.1/6.2 specifically, since they're the most likely to shift
   silently across releases.
 
+### 6.5 Function-pointer / indirect-call edges (Tier 2)
+clangd's `callHierarchy/outgoingCalls` only surfaces calls whose callee
+is statically a function reference — it cannot resolve `fn(x)` where
+`fn` is a function-pointer-typed parameter, variable, or struct field.
+That leaves a dead-end at every dispatcher when traversing the call
+graph. To close it, the extractor performs a separate AST-level pass via
+clangd's `textDocument/ast` extension and synthesizes a second class of
+edges, tagged `edge_kind = 'indirect'`.
+
+The pass collects two sets per TU and unions them whole-build:
+
+- **Indirect call sites:** every `CallExpr` whose callee, after peeling
+  `ImplicitCast` / `Paren` / `CStyleCast` wrappers, is not a `DeclRefExpr`
+  referring to a `Function`. Recorded as `(enclosing function USR,
+  callee static type)`. The callee static type comes from the topmost
+  wrapper's arcana; clangd writes typedef'd types as `'op_t':'int
+  (*)(int)'` so the canonical form is always available.
+- **Address-taken functions:** every `DeclRefExpr` referencing a
+  `Function` whose AST position is *not* the callee slot of an
+  enclosing `CallExpr` (i.e. the function is passed as an argument,
+  assigned, returned, taken with `&`, ...). Recorded as `(function USR,
+  function-pointer type)`.
+
+Synthesis rule: for each indirect site `(G, T)`, add one
+`G --indirect--> F` edge for every distinct address-taken function `F`
+whose recorded type equals `T`. Self-loops are filtered. Pairing is
+type-narrowed but not points-to-precise — this is sound
+over-approximation (Andersen-style), so the synthesized edges are best
+read as "*may* call any of these," not "calls all of these." MCP
+consumers can distinguish direct from indirect via the `edge_kind`
+field returned alongside callers / callees.
+
+Out of scope deliberately: per-call-site value-flow ("which concrete
+function values flow to *this* dispatch site?"). That requires a real
+analyzer (clang static analyzer, libclang AST walk) and is not
+something an LSP-driven indexer can offer cheaply. The synthesized
+edges' over-approximation noise is the accepted cost.
+
+Failure modes are non-fatal: if `textDocument/ast` returns null
+(clangd < 15) or the response is malformed, the Tier 2 pass produces
+empty sets and the rest of extraction proceeds as if it ran clean. The
+per-file cache stores `IndirectSites` and `AddressTaken` per TU, so a
+warm rebuild only re-runs the AST query for TUs that actually changed.
+
 ## 7. Caching — content-digest keyed, no VCS dependency
 
 Two granularities of the same idea, both keyed purely on content/command

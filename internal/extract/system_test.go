@@ -135,6 +135,30 @@ func TestSystemFixture(t *testing.T) {
 		}
 	}
 
+	// Tier 2 (architecture §6.5): dispatch's `fn(x)` is an indirect call
+	// of type int (*)(int); tu1.c hands square in as a function-pointer
+	// arg to dispatch (address-taken with matching type). Synthesis
+	// should produce dispatch --indirect--> square.
+	var dispatchUSR2, squareUSR2 string
+	for _, s := range res.Symbols {
+		switch s.Name {
+		case "dispatch":
+			dispatchUSR2 = s.USR
+		case "square":
+			squareUSR2 = s.USR
+		}
+	}
+	hasIndirect := false
+	for _, e := range res.Edges {
+		if e.CallerUSR == dispatchUSR2 && e.CalleeUSR == squareUSR2 && e.Kind == store.EdgeIndirect {
+			hasIndirect = true
+			break
+		}
+	}
+	if !hasIndirect {
+		t.Errorf("expected synthesized indirect edge dispatch→square, got edges=%+v", res.Edges)
+	}
+
 	// shared_hi should appear once (cross-TU USR dedup, architecture §11).
 	hits := 0
 	var sharedHiUSR string
@@ -207,12 +231,10 @@ func TestSystemFixture(t *testing.T) {
 		t.Errorf("expected A↔B cycle edges; ab=%v ba=%v", ab, ba)
 	}
 
-	// Function-pointer call: dispatch has no idea what `fn` resolves to,
-	// so there must NOT be an edge dispatch → square. (clangd's
-	// outgoingCalls *does* surface the literal `square` reference at the
-	// `dispatch(square, x)` *call site* — that edge ends up on
-	// tu1_indirect→square, which is fine; the gap we care about is the
-	// one inside dispatch itself.)
+	// Function-pointer call: clangd's callHierarchy cannot statically
+	// resolve `fn(x)`, so there must NOT be a *direct* dispatch→square
+	// edge claimed by callHierarchy. (The Tier 2 synthesis below should
+	// add a 'indirect'-kind edge — that's a separate assertion.)
 	var dispatchUSR, squareUSR string
 	for _, s := range res.Symbols {
 		switch s.Name {
@@ -223,8 +245,8 @@ func TestSystemFixture(t *testing.T) {
 		}
 	}
 	for _, e := range res.Edges {
-		if e.CallerUSR == dispatchUSR && e.CalleeUSR == squareUSR {
-			t.Errorf("unexpected dispatch→square edge: callHierarchy claimed to resolve a function-pointer call it cannot statically resolve")
+		if e.CallerUSR == dispatchUSR && e.CalleeUSR == squareUSR && e.Kind == store.EdgeDirect {
+			t.Errorf("unexpected DIRECT dispatch→square edge: callHierarchy claimed to resolve a function-pointer call it cannot statically resolve")
 		}
 	}
 
