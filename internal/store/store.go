@@ -74,28 +74,11 @@ type Symbol struct {
 	Signature string
 }
 
-// Edge kinds for call_edges.edge_kind. Anything outside this enum at
-// write time is normalized to EdgeDirect.
-const (
-	EdgeDirect   = "direct"
-	EdgeIndirect = "indirect"
-)
-
 // Edge is one row of call_edges, by USR. The writer resolves USRs to ids
-// once both endpoints exist. Kind defaults to EdgeDirect.
+// once both endpoints exist.
 type Edge struct {
 	CallerUSR string
 	CalleeUSR string
-	Kind      string
-}
-
-// EdgeRef is what get_callers / get_callees return — a Symbol plus the
-// edge_kind that connected it to the queried symbol. This lets MCP
-// consumers distinguish a clangd-confirmed direct call from a
-// synthesized indirect-call candidate (see architecture §6.5).
-type EdgeRef struct {
-	Symbol
-	EdgeKind string
 }
 
 // Store wraps an *sql.DB and is safe for concurrent reads. The daemon may
@@ -190,11 +173,7 @@ func WriteIndex(path string, symbols []Symbol, edges []Edge) error {
 		if !okC || !okE {
 			continue
 		}
-		kind := e.Kind
-		if kind != EdgeDirect && kind != EdgeIndirect {
-			kind = EdgeDirect
-		}
-		if _, err := insEdge.Exec(caller, callee, kind); err != nil {
+		if _, err := insEdge.Exec(caller, callee); err != nil {
 			return fmt.Errorf("insert edge: %w", err)
 		}
 	}
@@ -258,38 +237,26 @@ func (s *Store) GetSymbol(id int64) (Symbol, error) {
 	return scanSymbol(row)
 }
 
-// Callers returns symbols that call id, tagged with edge kind.
-func (s *Store) Callers(id int64) ([]EdgeRef, error) {
+// Callers returns symbols that directly call id.
+func (s *Store) Callers(id int64) ([]Symbol, error) {
 	db := s.db.Load()
 	rows, err := db.Query(q("get_callers"), id)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	return scanEdgeRefs(rows)
+	return scanSymbols(rows)
 }
 
-// Callees returns symbols called by id, tagged with edge kind.
-func (s *Store) Callees(id int64) ([]EdgeRef, error) {
+// Callees returns symbols directly called by id.
+func (s *Store) Callees(id int64) ([]Symbol, error) {
 	db := s.db.Load()
 	rows, err := db.Query(q("get_callees"), id)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	return scanEdgeRefs(rows)
-}
-
-func scanEdgeRefs(rows *sql.Rows) ([]EdgeRef, error) {
-	var out []EdgeRef
-	for rows.Next() {
-		var r EdgeRef
-		if err := rows.Scan(&r.ID, &r.USR, &r.Name, &r.Kind, &r.File, &r.Line, &r.DeclFile, &r.DeclLine, &r.Signature, &r.EdgeKind); err != nil {
-			return nil, err
-		}
-		out = append(out, r)
-	}
-	return out, rows.Err()
+	return scanSymbols(rows)
 }
 
 type rowScanner interface {

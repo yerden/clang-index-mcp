@@ -41,8 +41,6 @@ Dependency map:
 3. **Background indexing only starts after a `didOpen`.** Not after `initialize`, not after `workspace/symbol`. `extract.Run` opens every TU first, then calls `WaitForIndex`, then queries symbols + call hierarchy. Don't reorder.
 4. **USRs come from a clangd extension.** Stock LSP doesn't expose USRs. We use `textDocument/symbolInfo` (clangd-specific). If you swap to a different language server it won't have this.
 5. **Cross-TU edges require the background index.** Within-TU edges (self-recursion, intra-file cycles) work without it. If you see those edges in tests but cross-TU is empty, the index hasn't finished — check the `WaitForIndex` callback wiring.
-6. **AST-based Tier 2 also depends on clangd extensions** — specifically `textDocument/ast` (clangd 15+). It can return `null` for unsupported builds; treat that as "Tier 2 disabled," not as an error. clangd's AST `arcana` lines are the documented source of truth for expression types; in particular, typedef'd types are emitted as `'op_t':'int (*)(int)'` — the canonical form is the *second* quoted substring, not the first. The Tier 2 walker depends on this; if a future clangd changes the format, type-narrowed matching silently misses.
-7. **FunctionDecl AST nodes carry the wrong position for `symbolInfo`.** `n.Range.Start` covers `int foo(...) {` — the start of the type, not the identifier. Use the identifier position from `documentSymbol.selectionRange` (we already gather these). The Tier 2 walker takes `nameToNamePos` from the docSyms pass for exactly this reason.
 
 ### Store
 6. **Never migrate, always rebuild.** Each extraction writes a fresh DB. The daemon's `Swap` atomically points the live handle at the new file. Don't add ALTER paths.

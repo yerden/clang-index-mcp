@@ -15,7 +15,7 @@ RETURNING id;
 INSERT INTO symbols_fts (rowid, name, signature) VALUES (?, ?, ?);
 
 -- name: insert_call_edge
-INSERT INTO call_edges (caller_id, callee_id, edge_kind) VALUES (?, ?, ?);
+INSERT INTO call_edges (caller_id, callee_id) VALUES (?, ?);
 
 -- name: lookup_symbol_id_by_usr
 SELECT id FROM symbols WHERE usr = ?;
@@ -34,18 +34,16 @@ FROM symbols
 WHERE id = ?;
 
 -- name: get_callers
-SELECT s.id, s.usr, s.name, s.kind, s.file, s.line, s.decl_file, s.decl_line, s.signature, e.edge_kind
+SELECT s.id, s.usr, s.name, s.kind, s.file, s.line, s.decl_file, s.decl_line, s.signature
 FROM call_edges e
 JOIN symbols s ON s.id = e.caller_id
-WHERE e.callee_id = ?
-ORDER BY e.edge_kind, s.name;
+WHERE e.callee_id = ?;
 
 -- name: get_callees
-SELECT s.id, s.usr, s.name, s.kind, s.file, s.line, s.decl_file, s.decl_line, s.signature, e.edge_kind
+SELECT s.id, s.usr, s.name, s.kind, s.file, s.line, s.decl_file, s.decl_line, s.signature
 FROM call_edges e
 JOIN symbols s ON s.id = e.callee_id
-WHERE e.caller_id = ?
-ORDER BY e.edge_kind, s.name;
+WHERE e.caller_id = ?;
 
 -- name: list_symbols_in_file
 SELECT id, usr, name, kind, file, line, decl_file, decl_line, signature
