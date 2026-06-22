@@ -13,9 +13,16 @@ Both expose the same MCP tools, so assistants don't need to know which mode is b
 
 ## MCP tools
 
+Symbol & call-graph:
 - `search_symbol(query, limit?)` — FTS5 full-text search over symbol name and signature.
 - `get_symbol(id)` — fetch a symbol with its direct callers and callees.
 - `list_symbols_in_file(file, limit?)` — list every symbol declared *or* defined in a file. Useful for "what's the public surface of `foo.h`?" — matches either the declaration file (typically the header) or the definition file (typically the `.c`).
+
+Function-pointer dispatch (architecture §6.5):
+- `get_indirect_call_sites(function_id?, type?, limit?)` — CallExprs whose callee isn't a directly-named function. Each row carries `callee_type` and `callee_expr` (e.g. `fn`, `ops[i]`, `<base>.cb`).
+- `find_address_takes(type?, category?, context_detail_pattern?, limit?)` — sites where a function's address is taken (registered as a callback, stored in a struct/array, compared, returned, etc.). Each row carries a precedence-resolved `category` tag.
+- `get_address_take_sites(function_id, limit?)` — every recorded address-take for a specific function.
+- `describe_address_take_categories()` — returns the category vocabulary structured for programmatic use (same prose is embedded in the other tools' descriptions).
 
 Symbol records carry both a definition location (`File`/`Line`) and a declaration location (`DeclFile`/`DeclLine`). For static / file-local symbols, declaration and definition coincide and `DeclFile` is empty.
 
@@ -109,6 +116,16 @@ internal/
 testdata/
   fixture/              tiny C project for integration tests
 ```
+
+## Walking a function-pointer dispatcher
+
+When `get_symbol` shows a dispatcher whose body contains `fn(x)` and no direct callers/callees explain where the dispatch goes:
+
+1. `get_indirect_call_sites(function_id=dispatcher_id)` — read off `callee_type` (e.g. `int (*)(int)`) and `callee_expr` (e.g. `fn`).
+2. `find_address_takes(type=callee_type, category="arg_to", context_detail_pattern="dispatcher_name#%")` — enumerate the functions registered as that dispatcher's callback. For struct-stored callbacks use `category="stored_in"` with `context_detail_pattern="struct_type.field"`; for table dispatch, `category="array_init"`.
+3. Apply project-specific filters (naming patterns, header membership) the indexer can't infer.
+
+The `category` field is precedence-resolved; treat it as authoritative. `compared` rows are NEGATIVE signals (the pointer is being tested, not invoked) — exclude them. See `describe_address_take_categories` for the full vocabulary and precedence rule.
 
 ## Possible directions
 

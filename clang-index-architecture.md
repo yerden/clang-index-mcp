@@ -174,6 +174,83 @@ always documented precisely. Pin a specific release:
   re-verify §6.1/6.2 specifically, since they're the most likely to shift
   silently across releases.
 
+### 6.5 Function-pointer dispatch: facts, not synthesized edges
+clangd's `callHierarchy/outgoingCalls` only resolves direct calls — it
+stops dead at every function-pointer dispatcher (`fn(x)` inside a
+function that takes `op_t fn` as a parameter). A previous attempt
+(Tier 2, reverted at `1ec7c64`) tried to close the gap with sound
+over-approximation: for every indirect call site of type T, synthesize
+edges to every address-taken function of matching T. That was
+syntactically correct but practically too noisy — typedef-shape
+sharing alone over-connects dozens of unrelated callbacks in any
+real codebase.
+
+The current approach surfaces **raw facts** instead and lets the MCP
+consumer (typically an AI agent) decide how to bridge the gap. The
+agent has contextual knowledge — naming conventions, header
+membership, registry conventions — that a static synthesis rule
+cannot embed.
+
+Two tables hold the facts:
+
+- `address_takes(function_id, taken_at_file, taken_at_line,
+  fn_ptr_type, category, context_detail)` — one row per use of a
+  function's address.
+- `indirect_call_sites(caller_id, file, line, callee_type,
+  callee_expr)` — one row per CallExpr whose callee isn't a direct
+  function reference.
+
+Extraction runs over clangd's `textDocument/ast` (clangd 15+
+extension; degrades to "Tier 2 disabled, both tables empty" on older
+builds). The walker:
+
+1. Detects each `DeclRefExpr → Function` and classifies it by the
+   precedence rule below. Direct callees (child[0] of an enclosing
+   `CallExpr` after peeling cast/paren wrappers) are SKIPPED — they
+   are not address-takes.
+2. Detects each `CallExpr` whose callee isn't a direct
+   `DeclRefExpr → Function` and records it as an indirect call site
+   with the callee expression's static type (canonical form after
+   typedef expansion) and a short textual representation
+   (`fn` / `ops[i]` / `<base>.cb` / `<expr>`).
+
+**Category precedence (the load-bearing contract).** When multiple
+patterns apply to one address-take, the highest-precedence one wins.
+The agent receives the already-resolved value and must NOT re-derive:
+
+| rank | category | example | note |
+|---|---|---|---|
+| 1 | `compared` | `if (fn == square)`, `assert(fn != null_op)` | Negative signal — not invoking, just testing. Always exclude when looking for dispatchers. |
+| 2 | `arg_to:F#i` | `register_handler(square)` → `arg_to:register_handler#0` | Strongest dispatcher signal. |
+| 3 | `stored_in:T.f` | `ops.cb = square` → `stored_in:struct_ops.cb` | Registry pattern. |
+| 4 | `array_init:N[i?]` | `static op_t ops[] = {square}` → `array_init:ops[0]` | Dispatch table pattern. |
+| 5 | `assigned_to:v` | `op_t fn = square` → `assigned_to:fn` | Weaker; local flow. |
+| 6 | `returned_from:F` | `return square;` inside `pick_op` → `returned_from:pick_op` | Factory pattern. |
+| 7 | `other` | `(void*)square`, hash keys, debug uses | Not a dispatcher signal. |
+
+The canonical, agent-facing prose form of this table lives in
+`internal/extract/categories.go` as
+`AddressTakeCategoryVocabulary`; the `describe_address_take_categories`
+MCP tool returns it (and a structured form) verbatim. The vocabulary
+is a public contract — adding categories is safe, renaming or
+reordering is not.
+
+**Implementation notes worth carrying.** Walker state is a stack of
+frames; each frame remembers its child index in its parent so the
+classifier can read `inCalleeSubtree` without separate AST passes.
+After visiting child[0] of a `BinaryOperator` or `CallExpr`, the
+parent frame is populated with a `siblingHint` / `calleeName` so the
+later children's classification can read context that's already
+beneath us in the tree. This turns the walker into a single-pass
+visitor with O(depth) extra state.
+
+Failure modes are non-fatal in the same way the symbol/edge pipeline
+is: per-TU output (including `address_takes` and
+`indirect_call_sites`) is cached under the same per-file key, so
+warm rebuilds reuse them when the TU didn't change. Per architecture
+§6.3 the cache must be nuked after extraction-shape changes (e.g.
+adding a new category).
+
 ## 7. Caching — content-digest keyed, no VCS dependency
 
 Two granularities of the same idea, both keyed purely on content/command

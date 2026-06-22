@@ -16,6 +16,7 @@ import (
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	mcpsrv "github.com/mark3labs/mcp-go/server"
 
+	"github.com/yerden/clang-index-mcp/internal/extract"
 	"github.com/yerden/clang-index-mcp/internal/store"
 )
 
@@ -60,10 +61,14 @@ func (s *Server) registerTools() {
 	)
 	s.mcp.AddTool(
 		mcplib.NewTool("get_symbol",
-			mcplib.WithDescription("Fetch a symbol by id plus its direct callers and callees."),
+			mcplib.WithDescription("Fetch a symbol by id plus its DIRECT callers and callees. "+
+				"\"Direct\" means clangd resolved the call to a concrete function statically — `foo(x)` where `foo` is a known function. "+
+				"Indirect calls (`fn(x)` where `fn` is a function-pointer parameter, variable, struct field, or array slot) are NOT in callers/callees here. "+
+				"If the symbol is a dispatcher (look for indirect calls in its body) and you need to know who it might invoke, call get_indirect_call_sites with this symbol's id; "+
+				"if you want to know who registers THIS symbol as a callback (the reverse), call get_address_take_sites with this symbol's id."),
 			mcplib.WithNumber("id",
 				mcplib.Required(),
-				mcplib.Description("symbol id, as returned by search_symbol"),
+				mcplib.Description("Symbol id, as returned by search_symbol."),
 			),
 		),
 		s.handleGetSymbol,
@@ -80,6 +85,91 @@ func (s *Server) registerTools() {
 			),
 		),
 		s.handleListSymbolsInFile,
+	)
+
+	// Function-pointer dispatch tools (architecture §6.5). These
+	// surface raw facts (address-take sites + indirect call sites) and
+	// leave the synthesis of "which dispatcher might call this
+	// callback" to the agent — the agent has contextual knowledge
+	// (naming conventions, header membership) that lets it filter
+	// far more precisely than a sound-but-noisy static synthesis can.
+
+	addressTakeDesc := "Find function-pointer address-take sites in the index.\n\n" +
+		"Typical reverse-traversal usage (\"who might dispatch to X?\"):\n" +
+		"  1. get_address_take_sites(function_id=X.id)\n" +
+		"  2. For each `arg_to:F#i` row, F is a function that received X's address — likely a dispatcher.\n" +
+		"  3. get_indirect_call_sites(function_id=F.id) to verify F has an indirect call of matching type.\n\n" +
+		"Typical forward-traversal usage (\"what might dispatcher D invoke?\"):\n" +
+		"  1. get_indirect_call_sites(function_id=D.id) → read off callee_type T and callee_expr.\n" +
+		"  2. find_address_takes(type=T, category=\"arg_to\", context_detail_pattern=\"D_name#%\")\n" +
+		"     to enumerate the candidates registered with D.\n\n" +
+		extract.AddressTakeCategoryVocabulary
+
+	s.mcp.AddTool(
+		mcplib.NewTool("find_address_takes",
+			mcplib.WithDescription(addressTakeDesc),
+			mcplib.WithString("type",
+				mcplib.Description("Optional. Exact match on the canonical function-pointer type, e.g. \"int (*)(int)\". Use the canonical (post-typedef-decay) form — \"op_t\" will NOT match \"int (*)(int)\"."),
+			),
+			mcplib.WithString("category",
+				mcplib.Description("Optional. Exact match. One of: compared | arg_to | stored_in | array_init | assigned_to | returned_from | other. See category vocabulary in this tool's description."),
+			),
+			mcplib.WithString("context_detail_pattern",
+				mcplib.Description("Optional. Case-sensitive SQL LIKE pattern matched against context_detail. Wildcards: `%` = any chars (including empty), `_` = exactly one char. "+
+					"IMPORTANT: context_detail does NOT include the category prefix; pattern matches only the suffix part. "+
+					"Examples for category='arg_to': \"register_handler#%\" (any arg slot), \"register_handler#0\" (first arg only). "+
+					"Examples for category='stored_in': \"struct_ops.%\" (any field of struct_ops). "+
+					"Examples for category='array_init': \"ops%\" (any array starting with 'ops')."),
+			),
+			mcplib.WithNumber("limit",
+				mcplib.Description("Maximum results (default 200)."),
+			),
+		),
+		s.handleFindAddressTakes,
+	)
+
+	s.mcp.AddTool(
+		mcplib.NewTool("get_address_take_sites",
+			mcplib.WithDescription("List every site where the given function's address is taken (registered, stored, compared, returned, ...). "+
+				"Useful after get_symbol when you have a function and want to know how it's wired into dispatchers. "+
+				"Each row carries category + context_detail per site; aggregate across rows for the full picture.\n\n"+
+				extract.AddressTakeCategoryVocabulary),
+			mcplib.WithNumber("function_id",
+				mcplib.Required(),
+				mcplib.Description("Symbol id of the function WHOSE address is taken (the callback / handler). Not the dispatcher's id."),
+			),
+			mcplib.WithNumber("limit",
+				mcplib.Description("Maximum results (default 200)."),
+			),
+		),
+		s.handleGetAddressTakeSites,
+	)
+
+	s.mcp.AddTool(
+		mcplib.NewTool("get_indirect_call_sites",
+			mcplib.WithDescription("List indirect-call sites — CallExprs whose callee isn't a directly-named function. "+
+				"Each row carries callee_type (e.g. \"int (*)(int)\") and callee_expr (e.g. \"fn\", \"ops[i]\", \"<base>.cb\"). "+
+				"When you hit a dispatcher dead-end via get_symbol, call this with the dispatcher's id; "+
+				"inspect callee_expr and callee_type, then use find_address_takes(type=callee_type, category=\"arg_to\", context_detail_pattern=\"dispatcher_name#%\") to enumerate candidates.\n\n"+
+				"Omitting function_id returns every indirect call site in the project — useful for exploration but potentially many rows; combine with `type` or `limit`."),
+			mcplib.WithNumber("function_id",
+				mcplib.Description("Optional. Symbol id of the function CONTAINING the indirect calls (i.e. the dispatcher). Different semantics from get_address_take_sites's function_id."),
+			),
+			mcplib.WithString("type",
+				mcplib.Description("Optional. Exact match on callee_type (canonical form, e.g. \"int (*)(int)\")."),
+			),
+			mcplib.WithNumber("limit",
+				mcplib.Description("Maximum results (default 200)."),
+			),
+		),
+		s.handleGetIndirectCallSites,
+	)
+
+	s.mcp.AddTool(
+		mcplib.NewTool("describe_address_take_categories",
+			mcplib.WithDescription("Returns the vocabulary used in the `category` field of find_address_takes / get_address_take_sites. Structured for programmatic use: a precedence_order list and a per-category descriptor with name, rank, description, example, and agent_guidance. Call once at session start if you want the contract; the same prose is also embedded in those tools' descriptions."),
+		),
+		s.handleDescribeCategories,
 	)
 }
 
@@ -115,6 +205,68 @@ func (s *Server) handleListSymbolsInFile(ctx context.Context, req mcplib.CallToo
 		return mcplib.NewToolResultError("list_symbols_in_file: " + err.Error()), nil
 	}
 	return jsonResult(hits)
+}
+
+func (s *Server) handleFindAddressTakes(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+	args := req.GetArguments()
+	typeFilter, _ := args["type"].(string)
+	category, _ := args["category"].(string)
+	pattern, _ := args["context_detail_pattern"].(string)
+	limit := 200
+	if v, ok := args["limit"].(float64); ok {
+		limit = int(v)
+	}
+	hits, err := s.store.FindAddressTakes(typeFilter, category, pattern, limit)
+	if err != nil {
+		return mcplib.NewToolResultError("find_address_takes: " + err.Error()), nil
+	}
+	return jsonResult(hits)
+}
+
+func (s *Server) handleGetAddressTakeSites(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+	args := req.GetArguments()
+	idF, ok := args["function_id"].(float64)
+	if !ok {
+		return mcplib.NewToolResultError("function_id is required and must be a number"), nil
+	}
+	limit := 200
+	if v, ok := args["limit"].(float64); ok {
+		limit = int(v)
+	}
+	hits, err := s.store.GetAddressTakeSites(int64(idF), limit)
+	if err != nil {
+		return mcplib.NewToolResultError("get_address_take_sites: " + err.Error()), nil
+	}
+	return jsonResult(hits)
+}
+
+func (s *Server) handleGetIndirectCallSites(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+	args := req.GetArguments()
+	limit := 200
+	if v, ok := args["limit"].(float64); ok {
+		limit = int(v)
+	}
+	typeFilter, _ := args["type"].(string)
+	if idF, ok := args["function_id"].(float64); ok {
+		hits, err := s.store.GetIndirectCallSitesByCaller(int64(idF), limit)
+		if err != nil {
+			return mcplib.NewToolResultError("get_indirect_call_sites: " + err.Error()), nil
+		}
+		return jsonResult(hits)
+	}
+	hits, err := s.store.ListIndirectCallSites(typeFilter, limit)
+	if err != nil {
+		return mcplib.NewToolResultError("get_indirect_call_sites: " + err.Error()), nil
+	}
+	return jsonResult(hits)
+}
+
+func (s *Server) handleDescribeCategories(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+	return jsonResult(map[string]any{
+		"precedence_order": extract.AddressTakeCategoryPrecedence(),
+		"categories":       extract.AddressTakeCategoryDescriptors(),
+		"prose":            extract.AddressTakeCategoryVocabulary,
+	})
 }
 
 func (s *Server) handleGetSymbol(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {

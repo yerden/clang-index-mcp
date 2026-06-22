@@ -81,6 +81,72 @@ type Edge struct {
 	CalleeUSR string
 }
 
+// Address-take category values. See categories.go in internal/extract
+// for the canonical vocabulary surfaced to MCP consumers; these mirror
+// it. The writer normalizes unknown values to CategoryOther.
+const (
+	CategoryCompared     = "compared"
+	CategoryArgTo        = "arg_to"
+	CategoryStoredIn     = "stored_in"
+	CategoryArrayInit    = "array_init"
+	CategoryAssignedTo   = "assigned_to"
+	CategoryReturnedFrom = "returned_from"
+	CategoryOther        = "other"
+)
+
+func isKnownCategory(c string) bool {
+	switch c {
+	case CategoryCompared, CategoryArgTo, CategoryStoredIn,
+		CategoryArrayInit, CategoryAssignedTo, CategoryReturnedFrom, CategoryOther:
+		return true
+	}
+	return false
+}
+
+// AddressTake is one row of address_takes, by USR. Position is the
+// source location of the address-take expression itself, not of the
+// function whose address is taken.
+type AddressTake struct {
+	FunctionUSR   string `json:"function_usr"`
+	TakenAtFile   string `json:"taken_at_file"`   // relative to ProjectRoot
+	TakenAtLine   int    `json:"taken_at_line"`   // 1-based
+	FnPtrType     string `json:"fn_ptr_type"`
+	Category      string `json:"category"`
+	ContextDetail string `json:"context_detail"`
+}
+
+// IndirectCallSite is one row of indirect_call_sites, by USR.
+type IndirectCallSite struct {
+	CallerUSR  string `json:"caller_usr"`
+	File       string `json:"file"` // relative to ProjectRoot
+	Line       int    `json:"line"` // 1-based
+	CalleeType string `json:"callee_type"`
+	CalleeExpr string `json:"callee_expr"`
+}
+
+// AddressTakeRow is the read-side hydrated form: Symbol joined with the
+// fact's per-row columns.
+type AddressTakeRow struct {
+	Symbol
+	TakenAtFile   string `json:"taken_at_file"`
+	TakenAtLine   int    `json:"taken_at_line"`
+	FnPtrType     string `json:"fn_ptr_type"`
+	Category      string `json:"category"`
+	ContextDetail string `json:"context_detail"`
+}
+
+// IndirectCallSiteRow is the read-side hydrated form: caller Symbol
+// (under field Caller) plus per-site columns. We don't embed Symbol
+// because its File/Line columns would collide with the site's own
+// SiteFile/SiteLine.
+type IndirectCallSiteRow struct {
+	Caller     Symbol `json:"caller"`
+	SiteFile   string `json:"site_file"`
+	SiteLine   int    `json:"site_line"`
+	CalleeType string `json:"callee_type"`
+	CalleeExpr string `json:"callee_expr"`
+}
+
 // Store wraps an *sql.DB and is safe for concurrent reads. The daemon may
 // swap the underlying DB at any time via Swap; readers hold a snapshot
 // pointer for the duration of one call, so an in-flight query is never
@@ -120,12 +186,21 @@ func Create(path string) (*sql.DB, error) {
 	return db, nil
 }
 
-// WriteIndex writes symbols+edges to a fresh DB at path. The DB is
-// rebuilt from scratch every time — never migrate (architecture §8.2).
-// Edges whose endpoints don't both exist in symbols are silently
-// dropped; that situation only arises for external/unresolved symbols
-// the extractor couldn't define.
+// WriteIndex writes symbols+edges plus the raw function-pointer facts
+// (address_takes + indirect_call_sites) to a fresh DB at path. The DB
+// is rebuilt from scratch every time — never migrate (architecture
+// §8.2). Rows whose USR endpoints aren't present in symbols are
+// silently dropped; that arises for external/unresolved symbols.
+//
+// Pass nil for facts you don't have — old callers (tests, etc.) can
+// invoke the four-argument WriteIndexWithFacts variant when they need
+// to wire those tables.
 func WriteIndex(path string, symbols []Symbol, edges []Edge) error {
+	return WriteIndexWithFacts(path, symbols, edges, nil, nil)
+}
+
+// WriteIndexWithFacts is the full writer.
+func WriteIndexWithFacts(path string, symbols []Symbol, edges []Edge, addressTakes []AddressTake, indirectSites []IndirectCallSite) error {
 	db, err := Create(path)
 	if err != nil {
 		return err
@@ -175,6 +250,44 @@ func WriteIndex(path string, symbols []Symbol, edges []Edge) error {
 		}
 		if _, err := insEdge.Exec(caller, callee); err != nil {
 			return fmt.Errorf("insert edge: %w", err)
+		}
+	}
+
+	if len(addressTakes) > 0 {
+		insAT, err := tx.Prepare(q("insert_address_take"))
+		if err != nil {
+			return fmt.Errorf("prepare insert_address_take: %w", err)
+		}
+		defer insAT.Close()
+		for _, a := range addressTakes {
+			fnID, ok := usrToID[a.FunctionUSR]
+			if !ok {
+				continue
+			}
+			cat := a.Category
+			if !isKnownCategory(cat) {
+				cat = CategoryOther
+			}
+			if _, err := insAT.Exec(fnID, a.TakenAtFile, a.TakenAtLine, a.FnPtrType, cat, a.ContextDetail); err != nil {
+				return fmt.Errorf("insert address_take: %w", err)
+			}
+		}
+	}
+
+	if len(indirectSites) > 0 {
+		insICS, err := tx.Prepare(q("insert_indirect_call_site"))
+		if err != nil {
+			return fmt.Errorf("prepare insert_indirect_call_site: %w", err)
+		}
+		defer insICS.Close()
+		for _, s := range indirectSites {
+			callerID, ok := usrToID[s.CallerUSR]
+			if !ok {
+				continue
+			}
+			if _, err := insICS.Exec(callerID, s.File, s.Line, s.CalleeType, s.CalleeExpr); err != nil {
+				return fmt.Errorf("insert indirect_call_site: %w", err)
+			}
 		}
 	}
 
@@ -284,6 +397,98 @@ func (s *Store) ListSymbolsInFile(path string, limit int) ([]Symbol, error) {
 	}
 	defer rows.Close()
 	return scanSymbols(rows)
+}
+
+// GetAddressTakeSites returns every recorded address-take whose
+// function_id matches the given symbol id.
+func (s *Store) GetAddressTakeSites(functionID int64, limit int) ([]AddressTakeRow, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	db := s.db.Load()
+	rows, err := db.Query(q("get_address_take_sites"), functionID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanAddressTakeRows(rows)
+}
+
+// FindAddressTakes filters address_takes by exact fn_ptr_type, exact
+// category, and SQL LIKE pattern over context_detail. Empty filters
+// match everything.
+func (s *Store) FindAddressTakes(typeFilter, category, detailPattern string, limit int) ([]AddressTakeRow, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	db := s.db.Load()
+	rows, err := db.Query(q("find_address_takes"), typeFilter, category, detailPattern, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanAddressTakeRows(rows)
+}
+
+// GetIndirectCallSitesByCaller returns indirect call sites contained
+// in the given caller function.
+func (s *Store) GetIndirectCallSitesByCaller(callerID int64, limit int) ([]IndirectCallSiteRow, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	db := s.db.Load()
+	rows, err := db.Query(q("get_indirect_call_sites_by_caller"), callerID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanIndirectCallSiteRows(rows)
+}
+
+// ListIndirectCallSites enumerates all indirect call sites, optionally
+// filtered by exact callee_type.
+func (s *Store) ListIndirectCallSites(typeFilter string, limit int) ([]IndirectCallSiteRow, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	db := s.db.Load()
+	rows, err := db.Query(q("list_indirect_call_sites"), typeFilter, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanIndirectCallSiteRows(rows)
+}
+
+func scanAddressTakeRows(rows *sql.Rows) ([]AddressTakeRow, error) {
+	var out []AddressTakeRow
+	for rows.Next() {
+		var r AddressTakeRow
+		if err := rows.Scan(
+			&r.TakenAtFile, &r.TakenAtLine, &r.FnPtrType, &r.Category, &r.ContextDetail,
+			&r.ID, &r.USR, &r.Name, &r.Kind, &r.File, &r.Line, &r.DeclFile, &r.DeclLine, &r.Signature,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func scanIndirectCallSiteRows(rows *sql.Rows) ([]IndirectCallSiteRow, error) {
+	var out []IndirectCallSiteRow
+	for rows.Next() {
+		var r IndirectCallSiteRow
+		if err := rows.Scan(
+			&r.SiteFile, &r.SiteLine, &r.CalleeType, &r.CalleeExpr,
+			&r.Caller.ID, &r.Caller.USR, &r.Caller.Name, &r.Caller.Kind,
+			&r.Caller.File, &r.Caller.Line, &r.Caller.DeclFile, &r.Caller.DeclLine, &r.Caller.Signature,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 func scanSymbols(rows *sql.Rows) ([]Symbol, error) {

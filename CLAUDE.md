@@ -43,18 +43,34 @@ Dependency map:
 5. **Cross-TU edges require the background index.** Within-TU edges (self-recursion, intra-file cycles) work without it. If you see those edges in tests but cross-TU is empty, the index hasn't finished — check the `WaitForIndex` callback wiring.
 6. **`textDocument/symbolInfo` only answers for files that have been `didOpen`'d.** Callees whose definitions live in headers (notably `static inline`) come back from `callHierarchy/outgoingCalls` with a header URI; symbolInfo on that position returns empty USR if the header isn't open, and the symbol+edge get silently dropped. `extract.Run` exposes an `ensureOpened` callback to `extractTU` that lazily opens the callee's file on a first USR miss; the file is shared across TUs and didClose'd at end of Run. Don't bypass this on the assumption that the background index is enough — it's not, for this specific RPC.
 
+### Address-take walker (architecture §6.5)
+7. **Category precedence is the load-bearing contract.** Walker classifies each address-take via stack walk; the priority is `compared > arg_to > stored_in > array_init > assigned_to > returned_from > other`. Tests must cover the inversion case `assert(fn == square)` — that's `compared`, NOT `arg_to:assert#1`. If you ever reorder priority or change classifier behavior, re-run the system test and inspect the `Address-take precedence` block; agents will silently misclassify dispatcher candidates otherwise.
+8. **The vocabulary is a published contract.** `internal/extract/categories.go` is the single source of truth. The MCP tool descriptions embed it verbatim; the `describe_address_take_categories` tool returns it. Renaming a category breaks every agent prompt that's been built around the contract; only ever *append* new categories (at the end, after `other` or as a peer).
+9. **Walker sibling hints.** The walker remembers the LHS of `BinaryOperator(=)` and the callee of `CallExpr` on the *parent* frame at the moment child[0] is visited, so later children can classify themselves without back-traversing the tree. If you add new classification patterns that depend on cousins (e.g. struct-base-and-field), follow the same pattern in `visit`'s after-child[0] block. Without this, `stored_in:T.f` and `arg_to:F#i` lose their detail field.
+
+### MCP tool contract
+10. **Tool descriptions are part of the contract. Update them on every semantic change.** What the agent sees is the description string returned in `tools/list` — *not* the architecture doc, not the README, not the comments in the handler. If you change any of the following, update the relevant tool description in `internal/mcp/mcp.go` in the *same* commit:
+    - **Parameter semantics** (renaming, repurposing, changing units/encoding, switching between exact-match and pattern, swapping which entity a `function_id` refers to).
+    - **Response shape** (added/removed/renamed fields, new optional fields the agent needs to know to read).
+    - **Defaults** (limit values, default sort order, default filtering behavior).
+    - **Cross-tool relationships** (a new tool that obsoletes part of an existing one; a tool whose output is meant to feed another). The other tool's description must point at it.
+    - **The category vocabulary in `internal/extract/categories.go`** — adding a category, renaming one, or reordering precedence is a contract-breaking change that must propagate to every tool description that embeds the vocabulary, and to the `describe_address_take_categories` structured form.
+    Also add a fencing assertion to `TestToolDescriptionsCarryAgentGuidance` so the new phrase doesn't silently disappear in a later cleanup.
+
+11. **Agent-facing prose must say what you'd say to a new contributor in code review.** Specifically: which other tool to call next, the *not-this-but-that* clarifications when terms are overloaded (e.g. two `function_id` parameters with opposite semantics), what an empty result means, what wildcards / case rules apply for string filters, and any "looks like" trap (e.g. `context_detail` does NOT carry the category prefix even though the agent might infer it should). When in doubt: would a careful agent get the wrong answer without this sentence? If yes, the sentence belongs in the description.
+
 ### Store
-7. **Never migrate, always rebuild.** Each extraction writes a fresh DB. The daemon's `Swap` atomically points the live handle at the new file. Don't add ALTER paths.
-8. **Edges with unresolved endpoints are dropped at write time**, not at extract time. Architecture §11 has an open question about external/unresolved symbols; if you add support, the dropping point is `store.WriteIndex`.
-9. **`symbols.file` is relative to `ProjectRoot`** (§5.2). Don't store absolute paths; the artifact must be portable across build and serve environments.
+12. **Never migrate, always rebuild.** Each extraction writes a fresh DB. The daemon's `Swap` atomically points the live handle at the new file. Don't add ALTER paths.
+13. **Edges with unresolved endpoints are dropped at write time**, not at extract time. Architecture §11 has an open question about external/unresolved symbols; if you add support, the dropping point is `store.WriteIndexWithFacts`.
+14. **`symbols.file` is relative to `ProjectRoot`** (§5.2). Don't store absolute paths; the artifact must be portable across build and serve environments.
 
 ### Caching
-10. **Per-file cache key is `(file content digest, command digest)` over raw bytes — no normalization** (§7.2). Don't add whitespace stripping or sorting. The known gap (transitive header changes invisible to the key) is accepted; don't try to close it. Manual nuke is the documented fallback. Same applies after a schema/extraction change: a cached `tuPayload` from before today's run reflects the old extraction shape (e.g. missing `decl_file`, empty signatures); nuke the per-file cache directory after such changes.
-11. **Whole-build cache lookup must include every file referenced by the compdb**, not just the TUs. `cmd/clang-index/main.go` does this. If you change the compdb walker, keep the input-digest input set in sync.
+15. **Per-file cache key is `(file content digest, command digest)` over raw bytes — no normalization** (§7.2). Don't add whitespace stripping or sorting. The known gap (transitive header changes invisible to the key) is accepted; don't try to close it. Manual nuke is the documented fallback. Same applies after a schema/extraction change: a cached `tuPayload` from before today's run reflects the old extraction shape (e.g. missing `decl_file`, empty signatures, missing address_takes); nuke the per-file cache directory after such changes.
+16. **Whole-build cache lookup must include every file referenced by the compdb**, not just the TUs. `cmd/clang-index/main.go` does this. If you change the compdb walker, keep the input-digest input set in sync.
 
 ### Daemon
-12. **Restart over notify** (§6.1). Don't implement `workspace/didChangeWatchedFiles`. When compdb changes, the daemon debounces (5s) and restarts clangd. The new clangd reuses on-disk shards via `--background-index-path` (§6.2).
-13. **`--background-index-path` must be on persistent storage.** If it's container-ephemeral, every restart cold-starts; the persistence policy in §6.2 then doesn't apply.
+17. **Restart over notify** (§6.1). Don't implement `workspace/didChangeWatchedFiles`. When compdb changes, the daemon debounces (5s) and restarts clangd. The new clangd reuses on-disk shards via `--background-index-path` (§6.2).
+18. **`--background-index-path` must be on persistent storage.** If it's container-ephemeral, every restart cold-starts; the persistence policy in §6.2 then doesn't apply.
 
 ## Testing
 

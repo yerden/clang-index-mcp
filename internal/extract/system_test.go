@@ -97,6 +97,8 @@ func TestSystemFixture(t *testing.T) {
 		// when their header is didOpen'd before symbolInfo runs.
 		// Regression guard for that fix.
 		"inline_doubled",
+		// Helpers added for the address-take precedence test.
+		"assert_eq", "tu1_compared",
 	}
 	have := map[string]bool{}
 	for _, s := range res.Symbols {
@@ -263,6 +265,62 @@ func TestSystemFixture(t *testing.T) {
 		if strings.HasPrefix(s.File, "/") {
 			t.Errorf("symbol %q has absolute file path %q; should be relative to ProjectRoot", s.Name, s.File)
 		}
+	}
+
+	// Address-take precedence (architecture §6.5):
+	//   - square is passed to dispatch(square, x) → arg_to:dispatch#0
+	//   - square is passed to assert_eq(square, p) → arg_to:assert_eq#0
+	//   - p == square is a comparison → compared
+	// The 'compared' case overrides the surrounding `+` arithmetic;
+	// the assert_eq arg case overrides any compared classification that
+	// might be inferred from the assertion's body.
+	wantCategories := map[string]bool{
+		"compared":             false,
+		"arg_to:dispatch#0":    false,
+		"arg_to:assert_eq#0":   false,
+	}
+	for _, a := range res.AddressTakes {
+		if a.FunctionUSR != squareUSR {
+			continue
+		}
+		key := a.Category
+		if a.ContextDetail != "" {
+			key = a.Category + ":" + a.ContextDetail
+		}
+		if _, ok := wantCategories[key]; ok {
+			wantCategories[key] = true
+		}
+		if a.TakenAtLine == 0 {
+			t.Errorf("address-take site for square has zero line: %+v", a)
+		}
+		if a.FnPtrType == "" {
+			t.Errorf("address-take for square missing fn_ptr_type: %+v", a)
+		}
+	}
+	for k, found := range wantCategories {
+		if !found {
+			t.Errorf("expected address-take of square with category=%q, not found", k)
+		}
+	}
+
+	// Indirect call site (architecture §6.5): dispatch's body has the
+	// only indirect call in the fixture — `fn(x)`. Assert its presence
+	// with the correct callee_type and callee_expr.
+	foundDispatchSite := false
+	for _, s := range res.IndirectCallSites {
+		if s.CallerUSR != dispatchUSR {
+			continue
+		}
+		if s.CalleeType != "int (*)(int)" {
+			t.Errorf("dispatch indirect call site has callee_type=%q, want \"int (*)(int)\"", s.CalleeType)
+		}
+		if s.CalleeExpr != "fn" {
+			t.Errorf("dispatch indirect call site has callee_expr=%q, want \"fn\"", s.CalleeExpr)
+		}
+		foundDispatchSite = true
+	}
+	if !foundDispatchSite {
+		t.Errorf("expected an indirect_call_site row for dispatch, got %+v", res.IndirectCallSites)
 	}
 }
 

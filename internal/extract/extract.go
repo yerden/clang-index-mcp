@@ -48,16 +48,22 @@ type Options struct {
 	WaitForIndex func(context.Context) error
 }
 
-// Result is the in-memory bundle ready for store.WriteIndex.
+// Result is the in-memory bundle ready for store.WriteIndexWithFacts.
 type Result struct {
-	Symbols []store.Symbol
-	Edges   []store.Edge
+	Symbols           []store.Symbol
+	Edges             []store.Edge
+	AddressTakes      []store.AddressTake
+	IndirectCallSites []store.IndirectCallSite
 }
 
 // tuPayload is the JSON shape we round-trip through PerFile cache.
+// Address-take and indirect-call-site facts are per-TU, so they cache
+// the same way as symbols and edges (architecture §6.5).
 type tuPayload struct {
-	Symbols []store.Symbol `json:"symbols"`
-	Edges   []store.Edge   `json:"edges"`
+	Symbols           []store.Symbol         `json:"symbols"`
+	Edges             []store.Edge           `json:"edges"`
+	AddressTakes      []addressTakeFact      `json:"address_takes,omitempty"`
+	IndirectCallSites []indirectCallSiteFact `json:"indirect_call_sites,omitempty"`
 }
 
 // Run walks the compdb, queries clangd for each TU, and returns the
@@ -159,6 +165,8 @@ func Run(ctx context.Context, cli *lsp.Client, opts Options) (*Result, error) {
 	symbolsByUSR := map[string]store.Symbol{}
 	edgeSet := map[string]struct{}{}
 	var edges []store.Edge
+	var addressTakes []store.AddressTake
+	var indirectCallSites []store.IndirectCallSite
 
 	addPayload := func(p *tuPayload) {
 		for _, s := range p.Symbols {
@@ -182,6 +190,31 @@ func Run(ctx context.Context, cli *lsp.Client, opts Options) (*Result, error) {
 			edgeSet[k] = struct{}{}
 			edges = append(edges, e)
 		}
+		for _, a := range p.AddressTakes {
+			if a.FunctionUSR == "" {
+				continue
+			}
+			addressTakes = append(addressTakes, store.AddressTake{
+				FunctionUSR:   a.FunctionUSR,
+				TakenAtFile:   relative(projectRoot, a.TakenAtFile),
+				TakenAtLine:   a.TakenAtLine,
+				FnPtrType:     a.FnPtrType,
+				Category:      a.Category,
+				ContextDetail: a.ContextDetail,
+			})
+		}
+		for _, s := range p.IndirectCallSites {
+			if s.CallerUSR == "" {
+				continue
+			}
+			indirectCallSites = append(indirectCallSites, store.IndirectCallSite{
+				CallerUSR:  s.CallerUSR,
+				File:       relative(projectRoot, s.File),
+				Line:       s.Line,
+				CalleeType: s.CalleeType,
+				CalleeExpr: s.CalleeExpr,
+			})
+		}
 	}
 
 	for _, plan := range plans {
@@ -200,7 +233,11 @@ func Run(ctx context.Context, cli *lsp.Client, opts Options) (*Result, error) {
 		addPayload(payload)
 	}
 
-	out := &Result{Edges: edges}
+	out := &Result{
+		Edges:             edges,
+		AddressTakes:      addressTakes,
+		IndirectCallSites: indirectCallSites,
+	}
 	for _, s := range symbolsByUSR {
 		out.Symbols = append(out.Symbols, s)
 	}
@@ -269,6 +306,31 @@ func extractTU(ctx context.Context, cli *lsp.Client, absFile, projectRoot string
 	docSyms, err := decodeDocumentSymbols(rawSyms, uri)
 	if err != nil {
 		return nil, err
+	}
+
+	// Build the (name → identifier-position) map used by the AST
+	// walker. AST FunctionDecl nodes carry only the whole-declaration
+	// Range; symbolInfo needs the precise identifier position.
+	nameToNamePos := make(map[string]Position, len(docSyms))
+	for _, ds := range docSyms {
+		if isCallable(ds.Kind) {
+			if _, exists := nameToNamePos[ds.Name]; !exists {
+				nameToNamePos[ds.Name] = ds.SelectionRange.Start
+			}
+		}
+	}
+
+	// Tier 2-style fact extraction (architecture §6.5). Best-effort:
+	// returns empty sets on older clangd builds without
+	// textDocument/ast support, and the rest of extraction proceeds.
+	var addressTakes []addressTakeFact
+	var indirectCallSites []indirectCallSiteFact
+	if root, _ := fetchAST(ctx, cli, uri); root != nil {
+		w := newWalker(ctx, cli, uri)
+		w.nameToNamePos = nameToNamePos
+		w.walk(*root)
+		addressTakes = w.addressTakes
+		indirectCallSites = w.indirectCallSites
 	}
 
 	out := &tuPayload{}
@@ -340,6 +402,8 @@ func extractTU(ctx context.Context, cli *lsp.Client, absFile, projectRoot string
 		}
 	}
 
+	out.AddressTakes = addressTakes
+	out.IndirectCallSites = indirectCallSites
 	return out, nil
 }
 

@@ -51,3 +51,51 @@ FROM symbols
 WHERE decl_file = ?1 OR file = ?1
 ORDER BY decl_file, decl_line, name
 LIMIT ?2;
+
+-- name: insert_address_take
+INSERT INTO address_takes
+  (function_id, taken_at_file, taken_at_line, fn_ptr_type, category, context_detail)
+VALUES (?, ?, ?, ?, ?, ?);
+
+-- name: insert_indirect_call_site
+INSERT INTO indirect_call_sites
+  (caller_id, file, line, callee_type, callee_expr)
+VALUES (?, ?, ?, ?, ?);
+
+-- name: get_address_take_sites
+SELECT a.taken_at_file, a.taken_at_line, a.fn_ptr_type, a.category, a.context_detail,
+       s.id, s.usr, s.name, s.kind, s.file, s.line, s.decl_file, s.decl_line, s.signature
+FROM address_takes a
+JOIN symbols s ON s.id = a.function_id
+WHERE a.function_id = ?
+ORDER BY a.taken_at_file, a.taken_at_line
+LIMIT ?;
+
+-- name: find_address_takes
+SELECT a.taken_at_file, a.taken_at_line, a.fn_ptr_type, a.category, a.context_detail,
+       s.id, s.usr, s.name, s.kind, s.file, s.line, s.decl_file, s.decl_line, s.signature
+FROM address_takes a
+JOIN symbols s ON s.id = a.function_id
+WHERE (?1 = '' OR a.fn_ptr_type = ?1)
+  AND (?2 = '' OR a.category    = ?2)
+  AND (?3 = '' OR a.context_detail LIKE ?3)
+ORDER BY a.category, s.name, a.taken_at_file, a.taken_at_line
+LIMIT ?4;
+
+-- name: get_indirect_call_sites_by_caller
+SELECT i.file, i.line, i.callee_type, i.callee_expr,
+       s.id, s.usr, s.name, s.kind, s.file, s.line, s.decl_file, s.decl_line, s.signature
+FROM indirect_call_sites i
+JOIN symbols s ON s.id = i.caller_id
+WHERE i.caller_id = ?
+ORDER BY i.file, i.line
+LIMIT ?;
+
+-- name: list_indirect_call_sites
+SELECT i.file, i.line, i.callee_type, i.callee_expr,
+       s.id, s.usr, s.name, s.kind, s.file, s.line, s.decl_file, s.decl_line, s.signature
+FROM indirect_call_sites i
+JOIN symbols s ON s.id = i.caller_id
+WHERE (?1 = '' OR i.callee_type = ?1)
+ORDER BY s.name, i.file, i.line
+LIMIT ?2;

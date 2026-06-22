@@ -134,6 +134,53 @@ func TestListSymbolsInFileTool(t *testing.T) {
 	}
 }
 
+// TestToolDescriptionsCarryAgentGuidance fences the prose contract the
+// MCP tool descriptions are supposed to expose to the agent. These
+// phrases are load-bearing — if a refactor drops them silently, the
+// agent loses the warnings about direct-vs-indirect, function_id
+// semantics ambiguity, the LIKE wildcard rules, and the no-prefix-in-
+// context_detail trap.
+func TestToolDescriptionsCarryAgentGuidance(t *testing.T) {
+	srv := newTestServer(t)
+	resp, err := srv.HandleSingleMessage(context.Background(), []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	must := []string{
+		// get_symbol must warn the agent that callers/callees are direct only.
+		"DIRECT callers and callees",
+		// find_address_takes must explain that context_detail has no category prefix.
+		"context_detail does NOT include the category prefix",
+		// find_address_takes must list the category enum.
+		"compared | arg_to | stored_in | array_init | assigned_to | returned_from | other",
+		// find_address_takes must define the LIKE wildcards.
+		"`%` = any chars",
+		// get_address_take_sites must clarify it's the callback, not the dispatcher.
+		"WHOSE address is taken (the callback / handler). Not the dispatcher's id.",
+		// get_indirect_call_sites must clarify it's the dispatcher.
+		"CONTAINING the indirect calls (i.e. the dispatcher)",
+		// get_indirect_call_sites must signal the no-arg explosion risk.
+		"Omitting function_id returns every indirect call site in the project",
+		// Both forward and reverse traversal recipes must be visible.
+		"Typical reverse-traversal",
+		"Typical forward-traversal",
+	}
+	for _, m := range must {
+		if !jsonContains(resp, escapeJSON(m)) {
+			t.Errorf("tools/list missing agent-guidance phrase %q", m)
+		}
+	}
+}
+
+// escapeJSON returns the JSON-string-escaped form of s, since the
+// tools/list response embeds descriptions inside JSON string literals
+// and we want a byte-level match without dragging in a full decoder.
+func escapeJSON(s string) string {
+	b, _ := json.Marshal(s)
+	// strip the surrounding quotes
+	return string(b[1 : len(b)-1])
+}
+
 func TestUnknownTool(t *testing.T) {
 	srv := newTestServer(t)
 	resp, _ := srv.HandleSingleMessage(context.Background(), []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"nope","arguments":{}}}`))

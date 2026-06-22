@@ -128,7 +128,7 @@ func main() {
 		if err != nil {
 			return fmt.Errorf("extract: %w", err)
 		}
-		if err := store.WriteIndex(newPath, res.Symbols, res.Edges); err != nil {
+		if err := store.WriteIndexWithFacts(newPath, res.Symbols, res.Edges, res.AddressTakes, res.IndirectCallSites); err != nil {
 			return fmt.Errorf("write: %w", err)
 		}
 		if err := st.Swap(newPath); err != nil {

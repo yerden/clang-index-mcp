@@ -142,7 +142,7 @@ func runBuild(args []string) int {
 	}
 
 	tmpOut := *out + ".tmp"
-	if err := store.WriteIndex(tmpOut, res.Symbols, res.Edges); err != nil {
+	if err := store.WriteIndexWithFacts(tmpOut, res.Symbols, res.Edges, res.AddressTakes, res.IndirectCallSites); err != nil {
 		fmt.Fprintln(os.Stderr, "build: write:", err)
 		return 1
 	}
