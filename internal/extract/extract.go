@@ -162,6 +162,46 @@ func Run(ctx context.Context, cli *lsp.Client, opts Options) (*Result, error) {
 		}
 	}
 
+	// Pre-open referenced headers and collect a shared typedef table
+	// (architecture §6.5 gap round 2). clangd's textDocument/ast for a
+	// TU does NOT include the AST of #include'd headers, so typedefs
+	// defined in headers are otherwise invisible to the walker; without
+	// them, the indirect-call-site side of canonicalization can't
+	// substitute `lcore_function_t *` → `int (*)(void *)` and joins by
+	// type silently fail. documentLink gives us the resolved include
+	// targets per TU; we ensureOpened each one and pull the typedefs
+	// from its AST. Done once per Run, shared across all per-TU walkers.
+	sharedTypedefs := map[string]string{}
+	for _, tuURI := range openedURIs {
+		raw, err := cli.Call(ctx, "textDocument/documentLink", map[string]any{
+			"textDocument": map[string]any{"uri": tuURI},
+		})
+		if err != nil || len(raw) == 0 || string(raw) == "null" {
+			continue
+		}
+		var links []struct {
+			Target string `json:"target"`
+		}
+		if json.Unmarshal(raw, &links) != nil {
+			continue
+		}
+		for _, l := range links {
+			if l.Target == "" {
+				continue
+			}
+			ensureOpened(l.Target)
+		}
+	}
+	// After ensureOpened has expanded openedURIs to include headers,
+	// collect typedefs from every opened file's AST.
+	for _, uri := range openedURIs {
+		root, _ := fetchAST(ctx, cli, uri)
+		if root == nil {
+			continue
+		}
+		collectTypedefsFromAST(*root, sharedTypedefs)
+	}
+
 	symbolsByUSR := map[string]store.Symbol{}
 	edgeSet := map[string]struct{}{}
 	var edges []store.Edge
@@ -222,7 +262,7 @@ func Run(ctx context.Context, cli *lsp.Client, opts Options) (*Result, error) {
 			addPayload(plan.cached)
 			continue
 		}
-		payload, err := extractTU(ctx, cli, plan.entry.AbsFile(), projectRoot, ensureOpened)
+		payload, err := extractTU(ctx, cli, plan.entry.AbsFile(), projectRoot, ensureOpened, sharedTypedefs)
 		if err != nil {
 			return nil, fmt.Errorf("extract %s: %w", plan.entry.AbsFile(), err)
 		}
@@ -293,7 +333,7 @@ func openTU(cli *lsp.Client, absFile string) (string, error) {
 // when a callee's USR resolution fails — clangd's symbolInfo only
 // answers for didOpen'd files, so static inline functions and any
 // other header-defined callees need their header opened first.
-func extractTU(ctx context.Context, cli *lsp.Client, absFile, projectRoot string, ensureOpened func(uri string)) (*tuPayload, error) {
+func extractTU(ctx context.Context, cli *lsp.Client, absFile, projectRoot string, ensureOpened func(uri string), sharedTypedefs map[string]string) (*tuPayload, error) {
 	uri := pathToURI(absFile)
 
 	rawSyms, err := cli.Call(ctx, "textDocument/documentSymbol", map[string]any{
@@ -323,11 +363,24 @@ func extractTU(ctx context.Context, cli *lsp.Client, absFile, projectRoot string
 	// Tier 2-style fact extraction (architecture §6.5). Best-effort:
 	// returns empty sets on older clangd builds without
 	// textDocument/ast support, and the rest of extraction proceeds.
+	// The walker needs the TU source so it can recover designated-
+	// initializer field names (clangd does not expose them in the AST
+	// — we slice the source at the node's range start).
 	var addressTakes []addressTakeFact
 	var indirectCallSites []indirectCallSiteFact
 	if root, _ := fetchAST(ctx, cli, uri); root != nil {
+		src, _ := os.ReadFile(absFile)
 		w := newWalker(ctx, cli, uri)
 		w.nameToNamePos = nameToNamePos
+		// Seed the walker with typedefs collected at Run scope so
+		// header-defined typedefs (which don't appear in this TU's
+		// AST) participate in type canonicalization.
+		for k, v := range sharedTypedefs {
+			w.typedefs[k] = v
+		}
+		if len(src) > 0 {
+			w.sourceLines = strings.Split(string(src), "\n")
+		}
 		w.walk(*root)
 		addressTakes = w.addressTakes
 		indirectCallSites = w.indirectCallSites

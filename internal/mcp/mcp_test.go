@@ -164,6 +164,10 @@ func TestToolDescriptionsCarryAgentGuidance(t *testing.T) {
 		// Both forward and reverse traversal recipes must be visible.
 		"Typical reverse-traversal",
 		"Typical forward-traversal",
+		// Gap round 2 fix #1: canonical-form warning must mention typedef substitution.
+		"typedef-spelled forms",
+		// Gap round 2 fix #3: callee_expr_pattern must explain how to use ".field" patterns.
+		"callee_expr has the shape",
 	}
 	for _, m := range must {
 		if !jsonContains(resp, escapeJSON(m)) {

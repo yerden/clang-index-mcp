@@ -27,4 +27,21 @@ static inline int inline_doubled(int x) {
     return x * 2;
 }
 
+/* DPDK-style typedef + struct-of-fn-pointers dispatch (architecture
+ * §6.5 gap round 2): exercises three fixes at once.
+ *  - Typedef canonicalization: address-takes see `int (*)(int)`,
+ *    indirect call site sees `cb_t *` from the field's declared type;
+ *    both must canonicalize to the same string.
+ *  - Designated-init field-name: struct ops_t { cb_t *cb; ... }
+ *    registered via `.cb = my_callback` should record
+ *    `stored_in:struct ops_t.cb`, NOT `.<init>`.
+ *  - get_indirect_call_sites filtering by callee_expr so an agent can
+ *    distinguish `<expr>.cb` dispatch from same-typed siblings. */
+typedef int (cb_t)(int);
+struct ops_t {
+    cb_t *cb;
+    cb_t *aux;
+};
+int ops_dispatch(struct ops_t *o, int x);
+
 #endif

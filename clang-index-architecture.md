@@ -251,6 +251,66 @@ warm rebuilds reuse them when the TU didn't change. Per architecture
 §6.3 the cache must be nuked after extraction-shape changes (e.g.
 adding a new category).
 
+#### 6.5.1 Three gotchas that broke the documented workflow in practice
+
+Three correctness gaps surfaced when this index was used to trace
+real DPDK-style dispatch. The fixes each cross a layer boundary
+that's easy to revert by accident.
+
+**Typedef canonicalization across the join.** clangd's
+`textDocument/ast` returns the AST of the requested TU *without*
+inlining `#include`d headers, so TypedefDecls defined in headers are
+invisible to a per-TU walker. Address-takes (rooted at a DeclRef to a
+Function whose type is the bare function signature) end up canonical
+on their own; indirect-call sites (rooted at an ImplicitCast to a
+field's static type) carry the typedef-spelled form when the typedef
+is nested inside a pointer (e.g. `lcore_function_t *`). The two
+columns disagree and the documented "find dispatcher by callee_type /
+enumerate candidates by type" workflow silently breaks.
+
+Fix: `extract.Run` uses `textDocument/documentLink` to discover the
+`#include` targets of every opened TU, opens each one, and walks the
+union of opened-file ASTs to build a shared typedef table. The
+per-TU walker is seeded with that table, so both the address-take
+and indirect-call-site paths canonicalize against the same source of
+truth. The typedef substitution is whole-word; trailing `*`s next to
+a function-type body are reshaped into `(*)` so `int (void *) *` →
+`int (*)(void *)`.
+
+**Designated-initializer field names.** clangd's AST DesignatedInit
+node carries neither the field name in `Detail` nor in `Arcana` —
+the field designator is dropped before serialization. Without
+recovery the walker falls back to `<struct>.<init>`, which collapses
+every field-keyed registration of the same struct into one opaque
+row and makes the address-take → indirect-call join by field name
+impossible.
+
+Fix: when the classifier walks up the stack and hits a
+`DesignatedInit` ancestor, it slices the TU source at the node's
+range start (which clang places at the `.`) and reads the
+identifier. The enclosing aggregate type comes from the next-up
+VarDecl. This is the one place the walker depends on raw source
+text — worth carrying.
+
+**Querying indirect_call_sites by which field is dispatched.**
+`callee_expr` like `<base>.cb` is descriptive but only useful if
+queryable. `get_indirect_call_sites` accepts a `callee_expr_pattern`
+SQL LIKE filter; for member-access dispatch sites the
+agent-friendly form is `%.<field>` (any base, specific field). The
+canonical reverse-traversal recipe is now:
+
+  1. `get_address_take_sites(callback_id)` — find the registration
+     site, including the `stored_in:<struct>.<field>` row.
+  2. `get_indirect_call_sites(type=canonical_fn_ptr_type,
+     callee_expr_pattern="%.<field>")` — narrow to dispatchers
+     reading that field, dropping noise from same-typed but
+     unrelated callbacks.
+
+Without the field filter, a permissive type-only query returns
+every same-typed dispatch site in the project, which is how the
+agent that filed the second gap report constructed a false dispatch
+chain through an unrelated symbol.
+
 ## 7. Caching — content-digest keyed, no VCS dependency
 
 Two granularities of the same idea, both keyed purely on content/command

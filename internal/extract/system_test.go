@@ -303,9 +303,9 @@ func TestSystemFixture(t *testing.T) {
 		}
 	}
 
-	// Indirect call site (architecture §6.5): dispatch's body has the
-	// only indirect call in the fixture — `fn(x)`. Assert its presence
-	// with the correct callee_type and callee_expr.
+	// Indirect call site (architecture §6.5): dispatch's body has an
+	// indirect call — `fn(x)`. Assert its presence with the correct
+	// callee_type and callee_expr.
 	foundDispatchSite := false
 	for _, s := range res.IndirectCallSites {
 		if s.CallerUSR != dispatchUSR {
@@ -321,6 +321,66 @@ func TestSystemFixture(t *testing.T) {
 	}
 	if !foundDispatchSite {
 		t.Errorf("expected an indirect_call_site row for dispatch, got %+v", res.IndirectCallSites)
+	}
+
+	// Gap round 2 — designated-init field name (Gap 2): tu2_callback is
+	// registered via `.cb = tu2_callback` in tu2.c and must record
+	// `stored_in:struct ops_t.cb`, NOT `<struct>.<init>` and NOT
+	// "<init>" alone.
+	var tu2CallbackUSR string
+	for _, s := range res.Symbols {
+		if s.Name == "tu2_callback" {
+			tu2CallbackUSR = s.USR
+			break
+		}
+	}
+	foundDesignatedField := false
+	for _, a := range res.AddressTakes {
+		if a.FunctionUSR != tu2CallbackUSR {
+			continue
+		}
+		if a.Category == store.CategoryStoredIn {
+			if a.ContextDetail != "struct ops_t.cb" {
+				t.Errorf("tu2_callback stored_in detail = %q, want \"struct ops_t.cb\"", a.ContextDetail)
+			}
+			if a.FnPtrType != "int (*)(int)" {
+				t.Errorf("tu2_callback fn_ptr_type = %q, want canonical \"int (*)(int)\"", a.FnPtrType)
+			}
+			foundDesignatedField = true
+		}
+	}
+	if !foundDesignatedField {
+		t.Errorf("expected a stored_in address-take for tu2_callback with field name recovered")
+	}
+
+	// Gap round 2 — typedef canonicalization (Gap 1): ops_dispatch's
+	// indirect call site reads `o->cb`, whose static type spelling is
+	// `cb_t *`. The walker must canonicalize via the shared typedef
+	// table so address_takes.fn_ptr_type and
+	// indirect_call_sites.callee_type land on the same string —
+	// otherwise the documented join-by-type workflow silently breaks.
+	var opsDispatchUSR string
+	for _, s := range res.Symbols {
+		if s.Name == "ops_dispatch" {
+			opsDispatchUSR = s.USR
+			break
+		}
+	}
+	foundCanonicalOpsICS := false
+	for _, s := range res.IndirectCallSites {
+		if s.CallerUSR != opsDispatchUSR {
+			continue
+		}
+		if s.CalleeType != "int (*)(int)" {
+			t.Errorf("ops_dispatch ICS callee_type = %q, want canonical \"int (*)(int)\" (cb_t typedef must be expanded)", s.CalleeType)
+		}
+		if !strings.Contains(s.CalleeExpr, ".cb") {
+			t.Errorf("ops_dispatch ICS callee_expr = %q, want to contain \".cb\"", s.CalleeExpr)
+		}
+		foundCanonicalOpsICS = true
+	}
+	if !foundCanonicalOpsICS {
+		t.Errorf("expected an indirect_call_site for ops_dispatch")
 	}
 }
 

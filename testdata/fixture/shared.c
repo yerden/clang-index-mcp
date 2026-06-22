@@ -25,3 +25,11 @@ int b_calls_a(int x) {
 int dispatch(op_t fn, int x) {
     return fn(x);
 }
+
+/* Reads o->cb through the typedef-spelled field; the indirect call's
+ * callee_type comes from the field declaration (`cb_t *`) and must
+ * canonicalize to match the address-take recorded on registered
+ * callbacks (`int (*)(int)`). */
+int ops_dispatch(struct ops_t *o, int x) {
+    return o->cb(x);
+}

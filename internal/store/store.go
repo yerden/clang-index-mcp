@@ -431,13 +431,14 @@ func (s *Store) FindAddressTakes(typeFilter, category, detailPattern string, lim
 }
 
 // GetIndirectCallSitesByCaller returns indirect call sites contained
-// in the given caller function.
-func (s *Store) GetIndirectCallSitesByCaller(callerID int64, limit int) ([]IndirectCallSiteRow, error) {
+// in the given caller function. exprPattern is an optional SQL LIKE
+// pattern over callee_expr; empty matches all.
+func (s *Store) GetIndirectCallSitesByCaller(callerID int64, exprPattern string, limit int) ([]IndirectCallSiteRow, error) {
 	if limit <= 0 {
 		limit = 200
 	}
 	db := s.db.Load()
-	rows, err := db.Query(q("get_indirect_call_sites_by_caller"), callerID, limit)
+	rows, err := db.Query(q("get_indirect_call_sites_by_caller"), callerID, exprPattern, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -446,13 +447,13 @@ func (s *Store) GetIndirectCallSitesByCaller(callerID int64, limit int) ([]Indir
 }
 
 // ListIndirectCallSites enumerates all indirect call sites, optionally
-// filtered by exact callee_type.
-func (s *Store) ListIndirectCallSites(typeFilter string, limit int) ([]IndirectCallSiteRow, error) {
+// filtered by exact callee_type and SQL LIKE pattern over callee_expr.
+func (s *Store) ListIndirectCallSites(typeFilter, exprPattern string, limit int) ([]IndirectCallSiteRow, error) {
 	if limit <= 0 {
 		limit = 200
 	}
 	db := s.db.Load()
-	rows, err := db.Query(q("list_indirect_call_sites"), typeFilter, limit)
+	rows, err := db.Query(q("list_indirect_call_sites"), typeFilter, exprPattern, limit)
 	if err != nil {
 		return nil, err
 	}

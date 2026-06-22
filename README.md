@@ -121,11 +121,16 @@ testdata/
 
 When `get_symbol` shows a dispatcher whose body contains `fn(x)` and no direct callers/callees explain where the dispatch goes:
 
-1. `get_indirect_call_sites(function_id=dispatcher_id)` — read off `callee_type` (e.g. `int (*)(int)`) and `callee_expr` (e.g. `fn`).
+1. `get_indirect_call_sites(function_id=dispatcher_id)` — read off `callee_type` (e.g. `int (*)(int)`) and `callee_expr` (e.g. `fn`, `<base>.cb`, `ops[i]`).
 2. `find_address_takes(type=callee_type, category="arg_to", context_detail_pattern="dispatcher_name#%")` — enumerate the functions registered as that dispatcher's callback. For struct-stored callbacks use `category="stored_in"` with `context_detail_pattern="struct_type.field"`; for table dispatch, `category="array_init"`.
 3. Apply project-specific filters (naming patterns, header membership) the indexer can't infer.
 
-The `category` field is precedence-resolved; treat it as authoritative. `compared` rows are NEGATIVE signals (the pointer is being tested, not invoked) — exclude them. See `describe_address_take_categories` for the full vocabulary and precedence rule.
+For the reverse direction (you have a callback, want to find its dispatcher):
+
+1. `get_address_take_sites(function_id=callback_id)` — locate the `stored_in:<struct>.<field>` row.
+2. `get_indirect_call_sites(type=fn_ptr_type, callee_expr_pattern="%.<field>")` — narrow to dispatchers reading exactly that field, dropping noise from same-typed but unrelated callbacks elsewhere in the codebase.
+
+The `category` field is precedence-resolved; treat it as authoritative. `compared` rows are NEGATIVE signals (the pointer is being tested, not invoked) — exclude them. Types are canonicalized at extract time (typedef-spelled forms like `lcore_function_t *` are substituted to canonical `int (*)(void *)`), so always match against the canonical. See `describe_address_take_categories` for the full vocabulary and precedence rule.
 
 ## Possible directions
 

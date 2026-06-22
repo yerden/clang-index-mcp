@@ -57,6 +57,20 @@ type walker struct {
 	// identifier position.
 	nameToNamePos map[string]Position
 
+	// sourceLines is the TU source split by '\n'. Used to recover
+	// designated-initializer field names — clangd's textDocument/ast
+	// does not expose them in either Detail or Arcana, but the source
+	// at the DesignatedInit node's range start begins with `.<field>`.
+	sourceLines []string
+
+	// typedefs maps a typedef name (as appearing in expression types)
+	// to its canonical body. Populated during the walk from
+	// TypedefDecl nodes (whose arcana is `TypedefDecl ... '<body>'`).
+	// Used by canonicalizeType to bring address-take and indirect-
+	// call-site types into a single canonical form, which is what
+	// makes the documented "join by type" workflow actually work.
+	typedefs map[string]string
+
 	// stack of frames; top is the current node. Each frame records its
 	// position (childIndex) in its parent's children, which we walk to
 	// classify the context of an address-take.
@@ -116,7 +130,11 @@ type indirectCallSiteFact struct {
 }
 
 func newWalker(ctx context.Context, cli *lsp.Client, uri string) *walker {
-	return &walker{ctx: ctx, cli: cli, uri: uri, usrCache: map[Position]string{}}
+	return &walker{
+		ctx: ctx, cli: cli, uri: uri,
+		usrCache: map[Position]string{},
+		typedefs: map[string]string{},
+	}
 }
 
 // walk is the top-level entry point. Call once with the TU root.
@@ -148,6 +166,19 @@ func (w *walker) visit(n astNode, childIdx int) {
 		}
 	}
 
+	// Collect typedef bodies as we encounter them. clangd dumps a
+	// TypedefDecl as `TypedefDecl 0x... <loc> [referenced] <name>
+	// '<canonical body>'` — Detail is the name, the last quoted
+	// substring in Arcana is the canonical body. Done early so that
+	// any expressions DESCENDING from here can use the resolved form.
+	if n.Kind == "Typedef" && n.Role == "declaration" && n.Detail != "" {
+		if body := lastQuotedString(n.Arcana); body != "" && body != n.Detail {
+			if _, exists := w.typedefs[n.Detail]; !exists {
+				w.typedefs[n.Detail] = body
+			}
+		}
+	}
+
 	// Classify the current node.
 	switch n.Kind {
 	case "Call":
@@ -161,7 +192,7 @@ func (w *walker) visit(n astNode, childIdx int) {
 						FunctionUSR:   usr,
 						TakenAtFile:   uriToPath(w.uri),
 						TakenAtLine:   n.Range.Start.Line + 1,
-						FnPtrType:     fnPtrTypeFromContext(n.Arcana),
+						FnPtrType:     w.canonicalizeType(fnPtrTypeFromContext(n.Arcana)),
 						Category:      cat,
 						ContextDetail: detail,
 					})
@@ -204,7 +235,7 @@ func (w *walker) handleCall(n astNode) {
 	if stripped.Kind == "DeclRef" && referencesFunction(stripped.Arcana) {
 		return // direct call — covered by callHierarchy elsewhere
 	}
-	calleeType := normalizeFnPtrType(firstQuotedType(callee.Arcana))
+	calleeType := w.canonicalizeType(firstQuotedType(callee.Arcana))
 	if calleeType == "" {
 		return
 	}
@@ -251,6 +282,26 @@ func (w *walker) classifyAddressTake(n astNode) (cat, detail string, ok bool) {
 		switch anc.kind {
 		case "ImplicitCast", "CStyleCast", "Paren":
 			// Skip — these are syntactic noise around the address-take.
+			continue
+		case "DesignatedInit":
+			// `.field = expr` inside an InitListExpr. clangd's AST does
+			// NOT expose the field name in detail or arcana — we read
+			// it from the source at the node's range start, which by
+			// clang's source-location convention begins at the `.`.
+			// The enclosing InitListExpr (next frame up) carries the
+			// aggregate type; we look further up to the VarDecl for it
+			// since clangd writes "struct foo" with the right canonical
+			// spelling there.
+			field := w.designatedFieldName(anc.rangeStart)
+			structType := w.enclosingAggregateType(i)
+			if field != "" {
+				if structType != "" {
+					return store.CategoryStoredIn, structType + "." + field, true
+				}
+				return store.CategoryStoredIn, "." + field, true
+			}
+			// Couldn't recover the field — fall back to the old
+			// InitList classifier (which uses the <init> placeholder).
 			continue
 		case "BinaryOperator":
 			op := binaryOpKind(anc.arcana)
@@ -345,6 +396,52 @@ func (w *walker) classifyInitListContext(initListIdx int) (string, string, bool)
 	return store.CategoryAssignedTo, "", true
 }
 
+// designatedFieldName reads the TU source at pos and returns the
+// designator field name. clangd places the range start at the `.`,
+// so we slice from pos+1 and read identifier bytes.
+//
+// Returns "" if the source isn't available or the slice doesn't look
+// like `.<ident>`. We never fabricate a name on bad input.
+func (w *walker) designatedFieldName(pos Position) string {
+	if pos.Line < 0 || pos.Line >= len(w.sourceLines) {
+		return ""
+	}
+	line := w.sourceLines[pos.Line]
+	if pos.Character < 0 || pos.Character >= len(line) {
+		return ""
+	}
+	slice := line[pos.Character:]
+	if len(slice) < 2 || slice[0] != '.' {
+		return ""
+	}
+	end := 1
+	for end < len(slice) && isIdentByte(slice[end]) {
+		end++
+	}
+	if end == 1 {
+		return ""
+	}
+	return slice[1:end]
+}
+
+// enclosingAggregateType returns the canonical name of the aggregate
+// being initialized by the InitList that encloses the DesignatedInit
+// at stack[initIdx]. Walks up to the nearest VarDecl and reads its
+// type from arcana.
+func (w *walker) enclosingAggregateType(initIdx int) string {
+	for j := initIdx - 1; j >= 0; j-- {
+		if w.stack[j].kind == "Var" {
+			t := firstQuotedType(w.stack[j].arcana)
+			// Strip CV-qualifiers; agents will match against the
+			// unqualified name. "const struct foo" → "struct foo".
+			t = strings.TrimPrefix(t, "const ")
+			t = strings.TrimPrefix(t, "volatile ")
+			return t
+		}
+	}
+	return ""
+}
+
 // currentEnclosingFunctionName returns the name (Detail) of the
 // nearest enclosing FunctionDecl frame, or "" if none.
 func (w *walker) currentEnclosingFunctionName() string {
@@ -401,7 +498,11 @@ func referencesFunction(arcana string) bool {
 //	'op_t':'int (*)(int)'          (typedef + canonical)
 //
 // We prefer the canonical form (the second '...') whenever it's
-// present so that type-narrowing matches across typedef sites.
+// present so that type-narrowing matches across typedef sites. clangd
+// only emits the typedef:canonical pair when the *outermost* type is
+// a typedef; when the typedef is nested (e.g. `lcore_function_t *`,
+// where the outermost type is the pointer), only the typedef-spelled
+// form appears, and walker.canonicalizeType has to do the substitution.
 var typedefCanonicalRE = regexp.MustCompile(`'([^']*)':'([^']*)'`)
 var firstQuoteRE = regexp.MustCompile(`'([^']*)'`)
 
@@ -413,6 +514,137 @@ func firstQuotedType(arcana string) string {
 		return m[1]
 	}
 	return ""
+}
+
+// collectTypedefsFromAST walks an AST tree and harvests TypedefDecl
+// entries into out. Used at extract.Run scope to build a shared
+// typedef table that survives across TU walks — without this, headers'
+// typedef bodies (invisible to the per-TU AST) never reach the
+// canonicalizer. Safe to call multiple times against the same `out`.
+func collectTypedefsFromAST(n astNode, out map[string]string) {
+	if n.Kind == "Typedef" && n.Role == "declaration" && n.Detail != "" {
+		if body := lastQuotedString(n.Arcana); body != "" && body != n.Detail {
+			if _, ok := out[n.Detail]; !ok {
+				out[n.Detail] = body
+			}
+		}
+	}
+	for _, ch := range n.Children {
+		collectTypedefsFromAST(ch, out)
+	}
+}
+
+// lastQuotedString returns the final '...' substring of a clangd
+// arcana line. For TypedefDecls that's the canonical type body, e.g.
+// in `TypedefDecl 0x... <loc> referenced lcore_function_t 'int (void *)'`
+// it returns `int (void *)`.
+func lastQuotedString(arcana string) string {
+	all := firstQuoteRE.FindAllStringSubmatch(arcana, -1)
+	if len(all) == 0 {
+		return ""
+	}
+	return all[len(all)-1][1]
+}
+
+// canonicalizeType is the function that brings types from the two fact
+// tables into a single shape so the join-by-type workflow works. It:
+//
+//  1. Substitutes any known typedef name (whole-word match) with its
+//     canonical body, collected at extract time from TypedefDecls.
+//  2. Applies normalizeFnPtrType to reshape `ret (args)` function
+//     types into `ret (*)(args)` function-pointer types — once for the
+//     direct case and again for the "typedef expanded next to a `*`"
+//     case where the substitution leaves a bare function type with a
+//     trailing pointer.
+//
+// Idempotent and safe to call on an already-canonical type: if no
+// typedef names appear, the input passes through (only normalizeFnPtrType
+// touches it, which is also idempotent for already-canonical forms).
+func (w *walker) canonicalizeType(t string) string {
+	if t == "" {
+		return ""
+	}
+	if len(w.typedefs) == 0 {
+		return normalizeFnPtrType(t)
+	}
+	// Substitute typedef names. Whole-word only — `lcore_function_t`
+	// must not match inside `my_lcore_function_t_extra` etc.
+	for name, body := range w.typedefs {
+		t = substituteTypedefWord(t, name, body)
+	}
+	// After substitution we may have a function type followed by a
+	// pointer: `int (void *) *` — reshape to `int (*)(void *)`. Do
+	// this BEFORE the regular fn-ptr normalization so the latter
+	// doesn't double-insert (*).
+	t = reshapeFunctionTypePointer(t)
+	return normalizeFnPtrType(t)
+}
+
+// substituteTypedefWord replaces whole-word occurrences of name with
+// body inside t. "Whole word" = neither neighbor is an identifier
+// character. We don't iterate to a fixed point because typedef bodies
+// themselves can reference other typedefs and the walker's collection
+// happens during traversal — a single pass on a single type string is
+// enough for the cases we care about; deeper aliasing would need a
+// proper resolver.
+func substituteTypedefWord(t, name, body string) string {
+	if !strings.Contains(t, name) {
+		return t
+	}
+	var out strings.Builder
+	out.Grow(len(t))
+	i := 0
+	for i < len(t) {
+		j := strings.Index(t[i:], name)
+		if j < 0 {
+			out.WriteString(t[i:])
+			break
+		}
+		j += i
+		// Boundary checks.
+		leftOK := j == 0 || !isIdentByte(t[j-1])
+		end := j + len(name)
+		rightOK := end == len(t) || !isIdentByte(t[end])
+		out.WriteString(t[i:j])
+		if leftOK && rightOK {
+			out.WriteString(body)
+		} else {
+			out.WriteString(t[j:end])
+		}
+		i = end
+	}
+	return out.String()
+}
+
+func isIdentByte(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
+}
+
+// reshapeFunctionTypePointer turns `ret (args) *` (substituted from a
+// `<func_typedef> *` shape) into `ret (*)(args)`. Multiple trailing
+// pointers compound the inner-stars: `ret (args) **` → `ret (**)(args)`.
+//
+// Detection rule: find a function-shape `<ret> (<args>)` followed by
+// optional whitespace and one or more `*`. clangd's canonical syntax
+// always has a single space between return type and the `(args)`.
+var fnTypeWithTailPtrRE = regexp.MustCompile(`([^()]+\([^()]*\))\s*(\*+)`)
+
+func reshapeFunctionTypePointer(t string) string {
+	return fnTypeWithTailPtrRE.ReplaceAllStringFunc(t, func(m string) string {
+		sub := fnTypeWithTailPtrRE.FindStringSubmatch(m)
+		if sub == nil {
+			return m
+		}
+		head := sub[1]
+		stars := sub[2]
+		// `head` is `<ret> (<args>)`. Insert `(<stars>)` between
+		// return type and `(args)`.
+		idx := strings.LastIndex(head, " (")
+		if idx <= 0 {
+			return m
+		}
+		return head[:idx] + " (" + stars + ")" + head[idx+1:]
+	})
 }
 
 // fnPtrTypeFromContext returns the function-pointer type associated

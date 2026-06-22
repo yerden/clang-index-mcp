@@ -151,12 +151,18 @@ func (s *Server) registerTools() {
 				"Each row carries callee_type (e.g. \"int (*)(int)\") and callee_expr (e.g. \"fn\", \"ops[i]\", \"<base>.cb\"). "+
 				"When you hit a dispatcher dead-end via get_symbol, call this with the dispatcher's id; "+
 				"inspect callee_expr and callee_type, then use find_address_takes(type=callee_type, category=\"arg_to\", context_detail_pattern=\"dispatcher_name#%\") to enumerate candidates.\n\n"+
-				"Omitting function_id returns every indirect call site in the project — useful for exploration but potentially many rows; combine with `type` or `limit`."),
+				"Use callee_expr_pattern to narrow by which field/expression is being called through — e.g. \"%.lcore_func\" matches every dispatch site that reads `.lcore_func` on any base, which is how you distinguish multiple same-typed dispatchers in a registry-heavy codebase.\n\n"+
+				"Omitting function_id returns every indirect call site in the project — useful for exploration but potentially many rows; combine with `type`, `callee_expr_pattern`, or `limit`."),
 			mcplib.WithNumber("function_id",
 				mcplib.Description("Optional. Symbol id of the function CONTAINING the indirect calls (i.e. the dispatcher). Different semantics from get_address_take_sites's function_id."),
 			),
 			mcplib.WithString("type",
-				mcplib.Description("Optional. Exact match on callee_type (canonical form, e.g. \"int (*)(int)\")."),
+				mcplib.Description("Optional. Exact match on callee_type (canonical form, e.g. \"int (*)(int)\"). Types are canonicalized at extract time — typedef-spelled forms (e.g. \"lcore_function_t *\") are substituted to the canonical pointer form, so always match against the canonical."),
+			),
+			mcplib.WithString("callee_expr_pattern",
+				mcplib.Description("Optional. Case-sensitive SQL LIKE pattern over callee_expr. Wildcards: `%` = any chars, `_` = single char. "+
+					"For member-access dispatch sites callee_expr has the shape \"<base>.<field>\" — use \"%.<field>\" to match any base with a specific field, or \"<expr>\" for the opaque catch-all expressions. "+
+					"Examples: \"fn\" (param-named callbacks), \"%.lcore_func\" (any \".lcore_func\" dispatch), \"ops[%]\" (array-of-ops dispatch)."),
 			),
 			mcplib.WithNumber("limit",
 				mcplib.Description("Maximum results (default 200)."),
@@ -247,14 +253,15 @@ func (s *Server) handleGetIndirectCallSites(ctx context.Context, req mcplib.Call
 		limit = int(v)
 	}
 	typeFilter, _ := args["type"].(string)
+	exprPattern, _ := args["callee_expr_pattern"].(string)
 	if idF, ok := args["function_id"].(float64); ok {
-		hits, err := s.store.GetIndirectCallSitesByCaller(int64(idF), limit)
+		hits, err := s.store.GetIndirectCallSitesByCaller(int64(idF), exprPattern, limit)
 		if err != nil {
 			return mcplib.NewToolResultError("get_indirect_call_sites: " + err.Error()), nil
 		}
 		return jsonResult(hits)
 	}
-	hits, err := s.store.ListIndirectCallSites(typeFilter, limit)
+	hits, err := s.store.ListIndirectCallSites(typeFilter, exprPattern, limit)
 	if err != nil {
 		return mcplib.NewToolResultError("get_indirect_call_sites: " + err.Error()), nil
 	}

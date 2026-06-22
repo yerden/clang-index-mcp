@@ -87,9 +87,10 @@ SELECT i.file, i.line, i.callee_type, i.callee_expr,
        s.id, s.usr, s.name, s.kind, s.file, s.line, s.decl_file, s.decl_line, s.signature
 FROM indirect_call_sites i
 JOIN symbols s ON s.id = i.caller_id
-WHERE i.caller_id = ?
+WHERE i.caller_id = ?1
+  AND (?2 = '' OR i.callee_expr LIKE ?2)
 ORDER BY i.file, i.line
-LIMIT ?;
+LIMIT ?3;
 
 -- name: list_indirect_call_sites
 SELECT i.file, i.line, i.callee_type, i.callee_expr,
@@ -97,5 +98,6 @@ SELECT i.file, i.line, i.callee_type, i.callee_expr,
 FROM indirect_call_sites i
 JOIN symbols s ON s.id = i.caller_id
 WHERE (?1 = '' OR i.callee_type = ?1)
+  AND (?2 = '' OR i.callee_expr LIKE ?2)
 ORDER BY s.name, i.file, i.line
-LIMIT ?2;
+LIMIT ?3;
