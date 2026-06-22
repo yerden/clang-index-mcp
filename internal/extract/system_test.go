@@ -93,6 +93,10 @@ func TestSystemFixture(t *testing.T) {
 		"a_calls_b", "b_calls_a", "dispatch",
 		"tu1_caller", "tu1_indirect", "square",
 		"tu2_caller", "leaf", "mid", "chain_root",
+		// Static inline functions defined in headers are only surfaced
+		// when their header is didOpen'd before symbolInfo runs.
+		// Regression guard for that fix.
+		"inline_doubled",
 	}
 	have := map[string]bool{}
 	for _, s := range res.Symbols {
@@ -165,6 +169,32 @@ func TestSystemFixture(t *testing.T) {
 	}
 	if fanin < 2 {
 		t.Errorf("expected fan-in ≥2 edges into hot_callee, got %d", fanin)
+	}
+
+	// Static inline functions: the only direct edge tu1_caller→
+	// inline_doubled should exist. inline_doubled itself should record
+	// the header (include/shared.h) as its definition file.
+	var tu1CallerUSR, inlineDoubledUSR string
+	for _, s := range res.Symbols {
+		switch s.Name {
+		case "tu1_caller":
+			tu1CallerUSR = s.USR
+		case "inline_doubled":
+			inlineDoubledUSR = s.USR
+			if s.File != "include/shared.h" {
+				t.Errorf("inline_doubled.File = %q, want include/shared.h", s.File)
+			}
+		}
+	}
+	hasInlineEdge := false
+	for _, e := range res.Edges {
+		if e.CallerUSR == tu1CallerUSR && e.CalleeUSR == inlineDoubledUSR {
+			hasInlineEdge = true
+			break
+		}
+	}
+	if !hasInlineEdge {
+		t.Errorf("expected tu1_caller→inline_doubled edge (static inline header callee)")
 	}
 
 	// Recursion self-edge: factorial → factorial.

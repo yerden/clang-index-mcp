@@ -4,7 +4,8 @@ int tu1_caller(int x) {
     int a = shared_hi(x);
     int b = hot_callee(a);
     int c = factorial(b);
-    return a + b + c;
+    int d = inline_doubled(c);
+    return a + b + c + d;
 }
 
 static int square(int x) { return x * x; }

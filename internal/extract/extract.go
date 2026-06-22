@@ -112,6 +112,31 @@ func Run(ctx context.Context, cli *lsp.Client, opts Options) (*Result, error) {
 		openedURIs = append(openedURIs, uri)
 		plans = append(plans, plan)
 	}
+	openedSet := make(map[string]bool, len(openedURIs))
+	for _, u := range openedURIs {
+		openedSet[u] = true
+	}
+	// ensureOpened lazily opens a file we haven't seen yet. This is the
+	// fix for static inline (and any other header-defined) callees:
+	// clangd's textDocument/symbolInfo only resolves USRs for files
+	// that have been didOpen'd, so a callee whose definition lives in
+	// an unopened header silently disappears from the index. By opening
+	// it on demand the first time we hit such a callee, every later TU
+	// also benefits from the open (the set is shared across TUs).
+	ensureOpened := func(targetURI string) {
+		if openedSet[targetURI] {
+			return
+		}
+		absPath := uriToPath(targetURI)
+		if absPath == "" {
+			return
+		}
+		if _, err := openTU(cli, absPath); err != nil {
+			return
+		}
+		openedSet[targetURI] = true
+		openedURIs = append(openedURIs, targetURI)
+	}
 	defer func() {
 		for _, uri := range openedURIs {
 			_ = cli.Notify("textDocument/didClose", map[string]any{
@@ -164,7 +189,7 @@ func Run(ctx context.Context, cli *lsp.Client, opts Options) (*Result, error) {
 			addPayload(plan.cached)
 			continue
 		}
-		payload, err := extractTU(ctx, cli, plan.entry.AbsFile(), projectRoot)
+		payload, err := extractTU(ctx, cli, plan.entry.AbsFile(), projectRoot, ensureOpened)
 		if err != nil {
 			return nil, fmt.Errorf("extract %s: %w", plan.entry.AbsFile(), err)
 		}
@@ -227,7 +252,11 @@ func openTU(cli *lsp.Client, absFile string) (string, error) {
 
 // extractTU drives clangd for a single translation unit. The file must
 // already be open (see openTU); Run handles open/close lifecycle.
-func extractTU(ctx context.Context, cli *lsp.Client, absFile, projectRoot string) (*tuPayload, error) {
+// ensureOpened is a callback into Run that lazily opens header files
+// when a callee's USR resolution fails — clangd's symbolInfo only
+// answers for didOpen'd files, so static inline functions and any
+// other header-defined callees need their header opened first.
+func extractTU(ctx context.Context, cli *lsp.Client, absFile, projectRoot string, ensureOpened func(uri string)) (*tuPayload, error) {
 	uri := pathToURI(absFile)
 
 	rawSyms, err := cli.Call(ctx, "textDocument/documentSymbol", map[string]any{
@@ -284,7 +313,13 @@ func extractTU(ctx context.Context, cli *lsp.Client, absFile, projectRoot string
 		for _, callee := range callees {
 			calleeUSR, err := symbolUSR(ctx, cli, callee.URI, callee.Pos)
 			if err != nil || calleeUSR == "" {
-				continue
+				if ensureOpened != nil {
+					ensureOpened(callee.URI)
+					calleeUSR, err = symbolUSR(ctx, cli, callee.URI, callee.Pos)
+				}
+				if err != nil || calleeUSR == "" {
+					continue
+				}
 			}
 			if !seen[calleeUSR] {
 				seen[calleeUSR] = true

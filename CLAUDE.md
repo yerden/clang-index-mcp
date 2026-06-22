@@ -41,19 +41,20 @@ Dependency map:
 3. **Background indexing only starts after a `didOpen`.** Not after `initialize`, not after `workspace/symbol`. `extract.Run` opens every TU first, then calls `WaitForIndex`, then queries symbols + call hierarchy. Don't reorder.
 4. **USRs come from a clangd extension.** Stock LSP doesn't expose USRs. We use `textDocument/symbolInfo` (clangd-specific). If you swap to a different language server it won't have this.
 5. **Cross-TU edges require the background index.** Within-TU edges (self-recursion, intra-file cycles) work without it. If you see those edges in tests but cross-TU is empty, the index hasn't finished — check the `WaitForIndex` callback wiring.
+6. **`textDocument/symbolInfo` only answers for files that have been `didOpen`'d.** Callees whose definitions live in headers (notably `static inline`) come back from `callHierarchy/outgoingCalls` with a header URI; symbolInfo on that position returns empty USR if the header isn't open, and the symbol+edge get silently dropped. `extract.Run` exposes an `ensureOpened` callback to `extractTU` that lazily opens the callee's file on a first USR miss; the file is shared across TUs and didClose'd at end of Run. Don't bypass this on the assumption that the background index is enough — it's not, for this specific RPC.
 
 ### Store
-6. **Never migrate, always rebuild.** Each extraction writes a fresh DB. The daemon's `Swap` atomically points the live handle at the new file. Don't add ALTER paths.
-7. **Edges with unresolved endpoints are dropped at write time**, not at extract time. Architecture §11 has an open question about external/unresolved symbols; if you add support, the dropping point is `store.WriteIndex`.
-8. **`symbols.file` is relative to `ProjectRoot`** (§5.2). Don't store absolute paths; the artifact must be portable across build and serve environments.
+7. **Never migrate, always rebuild.** Each extraction writes a fresh DB. The daemon's `Swap` atomically points the live handle at the new file. Don't add ALTER paths.
+8. **Edges with unresolved endpoints are dropped at write time**, not at extract time. Architecture §11 has an open question about external/unresolved symbols; if you add support, the dropping point is `store.WriteIndex`.
+9. **`symbols.file` is relative to `ProjectRoot`** (§5.2). Don't store absolute paths; the artifact must be portable across build and serve environments.
 
 ### Caching
-9. **Per-file cache key is `(file content digest, command digest)` over raw bytes — no normalization** (§7.2). Don't add whitespace stripping or sorting. The known gap (transitive header changes invisible to the key) is accepted; don't try to close it. Manual nuke is the documented fallback. Same applies after a schema/extraction change: a cached `tuPayload` from before today's run reflects the old extraction shape (e.g. missing `decl_file`, empty signatures); nuke the per-file cache directory after such changes.
-10. **Whole-build cache lookup must include every file referenced by the compdb**, not just the TUs. `cmd/clang-index/main.go` does this. If you change the compdb walker, keep the input-digest input set in sync.
+10. **Per-file cache key is `(file content digest, command digest)` over raw bytes — no normalization** (§7.2). Don't add whitespace stripping or sorting. The known gap (transitive header changes invisible to the key) is accepted; don't try to close it. Manual nuke is the documented fallback. Same applies after a schema/extraction change: a cached `tuPayload` from before today's run reflects the old extraction shape (e.g. missing `decl_file`, empty signatures); nuke the per-file cache directory after such changes.
+11. **Whole-build cache lookup must include every file referenced by the compdb**, not just the TUs. `cmd/clang-index/main.go` does this. If you change the compdb walker, keep the input-digest input set in sync.
 
 ### Daemon
-11. **Restart over notify** (§6.1). Don't implement `workspace/didChangeWatchedFiles`. When compdb changes, the daemon debounces (5s) and restarts clangd. The new clangd reuses on-disk shards via `--background-index-path` (§6.2).
-12. **`--background-index-path` must be on persistent storage.** If it's container-ephemeral, every restart cold-starts; the persistence policy in §6.2 then doesn't apply.
+12. **Restart over notify** (§6.1). Don't implement `workspace/didChangeWatchedFiles`. When compdb changes, the daemon debounces (5s) and restarts clangd. The new clangd reuses on-disk shards via `--background-index-path` (§6.2).
+13. **`--background-index-path` must be on persistent storage.** If it's container-ephemeral, every restart cold-starts; the persistence policy in §6.2 then doesn't apply.
 
 ## Testing
 

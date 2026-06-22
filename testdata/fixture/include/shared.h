@@ -19,4 +19,12 @@ int b_calls_a(int x);
 /* fan-in target: called by multiple TUs. */
 int hot_callee(int x);
 
+/* static inline target: defined in this header, inlined at each call
+ * site. clangd's USRs for static inline functions are TU-qualified, so
+ * each TU sees its own instance; this exercises whether our extractor
+ * still surfaces them as callees. */
+static inline int inline_doubled(int x) {
+    return x * 2;
+}
+
 #endif
