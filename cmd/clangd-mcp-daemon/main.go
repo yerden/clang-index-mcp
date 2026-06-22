@@ -78,24 +78,32 @@ func main() {
 
 	srv := mcp.New(st, "clangd-mcp-daemon")
 
-	// Start MCP transports immediately. The daemon serves stdio by
-	// default and SSE if --http is provided.
+	// The daemon serves exactly one MCP transport: Streamable HTTP if
+	// --http is set, stdio otherwise. Running both at once would let a
+	// stdio client and an HTTP client share a single in-memory DB
+	// without any access-control story, and clients picking up the
+	// wrong endpoint silently is exactly the kind of foot-gun we'd
+	// rather force the operator to be explicit about.
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if err := srv.ServeStdio(ctx, os.Stdin, os.Stdout); err != nil {
-			fmt.Fprintln(os.Stderr, "stdio:", err)
-		}
-	}()
-
 	var httpSrv *mcpsrv.StreamableHTTPServer
 	if *httpAddr != "" {
 		httpSrv = srv.StreamableHTTPServer(mcpsrv.WithEndpointPath(*httpPath))
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
+			defer cancel() // listener exit => shut the daemon down
 			fmt.Fprintf(os.Stderr, "daemon: Streamable HTTP listening on %s%s\n", *httpAddr, *httpPath)
 			if err := httpSrv.Start(*httpAddr); err != nil && err != http.ErrServerClosed {
 				fmt.Fprintln(os.Stderr, "http:", err)
+			}
+		}()
+	} else {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer cancel() // stdin EOF / client hangup => shut the daemon down
+			if err := srv.ServeStdio(ctx, os.Stdin, os.Stdout); err != nil {
+				fmt.Fprintln(os.Stderr, "stdio:", err)
 			}
 		}()
 	}

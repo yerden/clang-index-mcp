@@ -178,25 +178,30 @@ func runServe(args []string) int {
 	ctx, cancel := signalCtx()
 	defer cancel()
 
-	var httpSrv *mcpsrv.StreamableHTTPServer
+	// Either Streamable HTTP or stdio — never both. Running both at
+	// once over the same store has no useful semantics (the two
+	// clients would share state without any access-control story) and
+	// silently picking the wrong endpoint is exactly the foot-gun
+	// we'd rather force the operator to be explicit about.
 	if *httpAddr != "" {
-		httpSrv = srv.StreamableHTTPServer(mcpsrv.WithEndpointPath(*httpPath))
+		httpSrv := srv.StreamableHTTPServer(mcpsrv.WithEndpointPath(*httpPath))
 		go func() {
+			defer cancel() // listener exit => unblock main and shut down
 			fmt.Fprintf(os.Stderr, "serve: Streamable HTTP listening on %s%s\n", *httpAddr, *httpPath)
 			if err := httpSrv.Start(*httpAddr); err != nil && err != http.ErrServerClosed {
 				fmt.Fprintln(os.Stderr, "serve: http:", err)
 			}
 		}()
+		<-ctx.Done()
+		shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutCancel()
+		_ = httpSrv.Shutdown(shutCtx)
+		return 0
 	}
 
 	if err := srv.ServeStdio(ctx, os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, "serve: stdio:", err)
 		return 1
-	}
-	if httpSrv != nil {
-		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = httpSrv.Shutdown(shutCtx)
 	}
 	return 0
 }
