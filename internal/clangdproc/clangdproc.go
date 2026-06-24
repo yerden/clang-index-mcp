@@ -24,6 +24,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -68,6 +70,21 @@ type Process struct {
 	// or when we decide to give up waiting.
 	indexedOnce sync.Once
 	indexedCh   chan struct{}
+
+	// indexProgressCb, if set via OnIndexProgress, receives percentage
+	// updates parsed from clangd's $/progress report events. Stored as
+	// a pointer so the LSP reader goroutine can swap-and-call without
+	// racing the setter.
+	indexProgressCb atomic.Pointer[func(IndexProgress)]
+}
+
+// IndexProgress is one update from clangd's background-index progress
+// stream. Percent is -1 when unknown (clangd's reports often omit the
+// `percentage` field and put "N/M" in Message instead — fireIndexProgress
+// derives Percent from that when possible).
+type IndexProgress struct {
+	Percent int
+	Message string
 }
 
 // Client returns the underlying LSP client for issuing requests.
@@ -127,21 +144,45 @@ func Start(ctx context.Context, opts Options) (*Process, error) {
 
 	// Track background-index progress. clangd emits work-done progress
 	// with token "backgroundIndexProgress"; .kind = begin/report/end.
+	// In practice clangd omits `percentage` on reports and puts the
+	// shard counter in `message` (e.g. "12/87"); fireIndexProgress
+	// derives Percent from that. The terminal `end` event is what
+	// unblocks WaitIndexed.
 	cli.OnNotification("$/progress", func(raw json.RawMessage) {
 		var note struct {
 			Token any `json:"token"`
 			Value struct {
-				Kind  string `json:"kind"`
-				Title string `json:"title"`
+				Kind       string `json:"kind"`
+				Title      string `json:"title"`
+				Message    string `json:"message"`
+				Percentage *int   `json:"percentage"`
 			} `json:"value"`
 		}
 		if err := json.Unmarshal(raw, &note); err != nil {
 			return
 		}
 		tok := fmt.Sprintf("%v", note.Token)
-		if note.Value.Kind == "end" &&
-			(strings.Contains(strings.ToLower(tok), "background") ||
-				strings.Contains(strings.ToLower(note.Value.Title), "indexing")) {
+		isBgIndex := strings.Contains(strings.ToLower(tok), "background") ||
+			strings.Contains(strings.ToLower(note.Value.Title), "indexing")
+		if !isBgIndex {
+			return
+		}
+		switch note.Value.Kind {
+		case "begin":
+			p.fireIndexProgress(IndexProgress{Percent: -1, Message: note.Value.Message})
+		case "report":
+			pct := -1
+			if note.Value.Percentage != nil {
+				pct = *note.Value.Percentage
+			} else if n, m, ok := parseFraction(note.Value.Message); ok && m > 0 {
+				pct = (n * 100) / m
+			}
+			p.fireIndexProgress(IndexProgress{Percent: pct, Message: note.Value.Message})
+		case "end":
+			// clangd's end-event message is typically "0/N" ("N remaining
+			// of N") which would read like the bar regressed; suppress it
+			// so the final paint is just "100%".
+			p.fireIndexProgress(IndexProgress{Percent: 100})
 			p.markIndexed()
 		}
 	})
@@ -184,6 +225,41 @@ func (p *Process) markIndexed() {
 		p.indexDone.Store(true)
 		close(p.indexedCh)
 	})
+}
+
+// OnIndexProgress registers a callback for clangd's background-index
+// progress. Called from the LSP reader goroutine; the callback must
+// not block. Pass nil to clear. Safe to call before Start completes.
+func (p *Process) OnIndexProgress(cb func(IndexProgress)) {
+	if cb == nil {
+		p.indexProgressCb.Store(nil)
+		return
+	}
+	p.indexProgressCb.Store(&cb)
+}
+
+func (p *Process) fireIndexProgress(ev IndexProgress) {
+	if cb := p.indexProgressCb.Load(); cb != nil {
+		(*cb)(ev)
+	}
+}
+
+var fractionRE = regexp.MustCompile(`(\d+)\s*/\s*(\d+)`)
+
+// parseFraction pulls the first "N/M" pair out of s. clangd's
+// backgroundIndexProgress messages look like "12/87" or
+// "12/87 (3 in progress)" — both produce (12, 87, true).
+func parseFraction(s string) (n, m int, ok bool) {
+	match := fractionRE.FindStringSubmatch(s)
+	if match == nil {
+		return 0, 0, false
+	}
+	n, err1 := strconv.Atoi(match[1])
+	m, err2 := strconv.Atoi(match[2])
+	if err1 != nil || err2 != nil {
+		return 0, 0, false
+	}
+	return n, m, true
 }
 
 // WaitIndexed blocks until clangd reports background indexing complete,

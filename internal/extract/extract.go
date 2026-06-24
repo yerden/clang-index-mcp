@@ -47,6 +47,11 @@ type Options struct {
 	// background indexer doesn't start until at least one file is open,
 	// so the wait must happen *after* the didOpens, not before.
 	WaitForIndex func(context.Context) error
+
+	// OnTUProgress, if non-nil, is invoked once per TU as the per-TU
+	// extraction loop advances: (done, total) with done in [1, total].
+	// Runs on Run's goroutine so callbacks must not block.
+	OnTUProgress func(done, total int)
 }
 
 // Result is the in-memory bundle ready for store.WriteIndexWithFacts.
@@ -266,9 +271,12 @@ func Run(ctx context.Context, cli *lsp.Client, opts Options) (*Result, error) {
 		}
 	}
 
-	for _, plan := range plans {
+	for i, plan := range plans {
 		if plan.cached != nil {
 			addPayload(plan.cached)
+			if opts.OnTUProgress != nil {
+				opts.OnTUProgress(i+1, len(plans))
+			}
 			continue
 		}
 		payload, err := extractTU(ctx, cli, plan.entry.AbsFile(), projectRoot, ensureOpened, sharedTypedefs)
@@ -280,6 +288,9 @@ func Run(ctx context.Context, cli *lsp.Client, opts Options) (*Result, error) {
 			_ = opts.PerFile.Put(plan.key, &cache.PerFileEntry{Payload: b})
 		}
 		addPayload(payload)
+		if opts.OnTUProgress != nil {
+			opts.OnTUProgress(i+1, len(plans))
+		}
 	}
 
 	out := &Result{

@@ -123,6 +123,10 @@ func runBuild(args []string) int {
 	}
 	defer proc.Stop(context.Background())
 
+	bar := newProgressBar()
+	defer bar.Finish()
+	proc.OnIndexProgress(bar.reportIndex)
+
 	res, err := extract.Run(ctx, proc.Client(), extract.Options{
 		CompDBPath:  abs,
 		ProjectRoot: *projectRoot,
@@ -135,7 +139,9 @@ func runBuild(args []string) int {
 			}
 			return nil
 		},
+		OnTUProgress: bar.reportExtract,
 	})
+	bar.Finish()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "build: extract:", err)
 		return 1
