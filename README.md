@@ -67,6 +67,14 @@ clangd-mcp-daemon \
 
 The daemon watches `compile_commands.json`. When it changes, clangd is restarted (debounced 5 s) and the index is rebuilt. The live `*sql.DB` handle is then atomically swapped — in-flight MCP queries never see a half-built database.
 
+> **Disable clang-tidy in clangd.** The indexer calls `textDocument/documentLink` on every TU (to resolve typedefs from headers). clangd processes that request through its AST worker, which also runs any enabled clang-tidy checkers. A crashing checker kills clangd mid-extraction; the daemon will retry, but the crash recurs on the same file. Add this to `~/.clangd` (or the project's `.clangd`) to suppress all clang-tidy checks for clangd — it does not affect your editor or CI runs:
+>
+> ```yaml
+> Diagnostics:
+>   ClangTidy:
+>     Remove: ["*"]
+> ```
+
 ## Configuring an MCP client
 
 For Claude Desktop, add to `claude_desktop_config.json`:

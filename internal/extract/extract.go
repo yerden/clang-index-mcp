@@ -15,6 +15,7 @@ package extract
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -176,7 +177,15 @@ func Run(ctx context.Context, cli *lsp.Client, opts Options) (*Result, error) {
 		raw, err := cli.Call(ctx, "textDocument/documentLink", map[string]any{
 			"textDocument": map[string]any{"uri": tuURI},
 		})
-		if err != nil || len(raw) == 0 || string(raw) == "null" {
+		if err != nil {
+			// If the client is closed (clangd crashed), stop immediately
+			// and surface the error so the daemon can restart clangd.
+			if errors.Is(err, lsp.ErrClientClosed) || errors.Is(err, lsp.ErrConnectionClosed) {
+				return nil, err
+			}
+			continue
+		}
+		if len(raw) == 0 || string(raw) == "null" {
 			continue
 		}
 		var links []struct {

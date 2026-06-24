@@ -20,6 +20,14 @@ import (
 	"sync/atomic"
 )
 
+// ErrClientClosed is returned by Call/Notify when the connection is
+// already known to be closed (e.g. the server process has exited).
+var ErrClientClosed = errors.New("lsp: client is closed")
+
+// ErrConnectionClosed is returned when the connection closes while a
+// request is in flight (the reply channel is drained without a value).
+var ErrConnectionClosed = errors.New("lsp: connection closed before reply")
+
 // Client is a goroutine-safe JSON-RPC client over the LSP base protocol.
 // Construct with NewClient and start the read loop with Run; one Run per
 // Client, on its own goroutine.
@@ -203,7 +211,7 @@ func (c *Client) readMessage() (*raw, error) {
 // JSON of the `result` field; decode it at the call site.
 func (c *Client) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	if c.closed.Load() {
-		return nil, errors.New("lsp: client is closed")
+		return nil, ErrClientClosed
 	}
 	id := c.nextID.Add(1)
 	ch := make(chan *response, 1)
@@ -231,7 +239,7 @@ func (c *Client) Call(ctx context.Context, method string, params any) (json.RawM
 		return nil, ctx.Err()
 	case resp, ok := <-ch:
 		if !ok {
-			return nil, errors.New("lsp: connection closed before reply")
+			return nil, ErrConnectionClosed
 		}
 		if resp.Error != nil {
 			return nil, resp.Error

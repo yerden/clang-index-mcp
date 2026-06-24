@@ -2,8 +2,13 @@ package clangdproc
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"os"
 	"sync"
 	"time"
+
+	"github.com/yerden/clang-index-mcp/internal/lsp"
 )
 
 // Daemon adds restart-on-watch on top of Process. It owns one Process at
@@ -86,20 +91,45 @@ func timerC(t *time.Timer) <-chan time.Time {
 	return t.C
 }
 
+// isCrashError reports whether err was caused by the clangd process
+// dying mid-flight (closed connection) rather than by a logic error in
+// extraction. When true, a fresh clangd start is likely to succeed.
+func isCrashError(err error) bool {
+	return errors.Is(err, lsp.ErrClientClosed) || errors.Is(err, lsp.ErrConnectionClosed)
+}
+
 func (d *Daemon) start(ctx context.Context, onReady func(p *Process) error) error {
-	p, err := Start(ctx, d.opts)
-	if err != nil {
-		return err
-	}
-	d.mu.Lock()
-	d.current = p
-	d.mu.Unlock()
-	if onReady != nil {
-		if err := onReady(p); err != nil {
+	const maxCrashRetries = 3
+	for attempt := range maxCrashRetries {
+		p, err := Start(ctx, d.opts)
+		if err != nil {
 			return err
 		}
+		d.mu.Lock()
+		d.current = p
+		d.mu.Unlock()
+		if onReady == nil {
+			return nil
+		}
+		err = onReady(p)
+		if err == nil {
+			return nil
+		}
+		if !isCrashError(err) {
+			return err
+		}
+		// clangd crashed during extraction — clean up the dead process
+		// and try again with a fresh one.
+		fmt.Fprintf(os.Stderr, "daemon: clangd crashed during extraction (attempt %d/%d): %v\n",
+			attempt+1, maxCrashRetries, err)
+		d.stopCurrent(context.Background())
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
 	}
-	return nil
+	return fmt.Errorf("clangdproc: clangd crashed %d times in a row; giving up", maxCrashRetries)
 }
 
 func (d *Daemon) stopCurrent(ctx context.Context) {

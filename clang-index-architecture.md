@@ -174,6 +174,28 @@ always documented precisely. Pin a specific release:
   re-verify §6.1/6.2 specifically, since they're the most likely to shift
   silently across releases.
 
+#### 6.4.1 Disable clang-tidy in clangd
+`extract.Run` calls `textDocument/documentLink` for every opened TU to
+discover `#include` targets for typedef collection (§6.5.1). clangd
+processes `DocumentLinks` via its AST worker, which also runs any
+enabled clang-tidy matchers. A crashing checker kills the clangd
+process mid-extraction; the daemon auto-restarts (up to 3 times), but
+the same file will crash clangd every time if the checker is still
+active.
+
+clangd's indexer is used here purely for symbol/AST queries — not for
+diagnostics. Disable clang-tidy in your `~/.clangd` (user-wide) or in
+the project's `.clangd`:
+
+```yaml
+Diagnostics:
+  ClangTidy:
+    Remove: ["*"]
+```
+
+This suppresses all clang-tidy checks globally for clangd without
+affecting your editor's or CI's own clang-tidy runs.
+
 ### 6.5 Function-pointer dispatch: facts, not synthesized edges
 clangd's `callHierarchy/outgoingCalls` only resolves direct calls — it
 stops dead at every function-pointer dispatcher (`fn(x)` inside a
