@@ -108,6 +108,19 @@ clang-index build --compdb ... --out index.db --per-file-cache ~/.cache/clang-in
 
 Both caches are keyed on raw-bytes digests — no normalization, no VCS dependency. The known limitation: per-file keys don't include transitively-included header content, so editing a shared header is invisible to the cache. Workaround: nuke the cache directory. See [architecture §7](clang-index-architecture.md#7-caching--content-digest-keyed-no-vcs-dependency).
 
+## Speeding up clangd's background index
+
+Both `clang-index build` and `clangd-mcp-daemon` accept two clangd-tuning flags. By default clangd sizes its worker pool to roughly *half* your logical cores and runs the indexer at the OS's lowest priority (Linux: nice 19 + idle I/O) so it doesn't fight with a foreground IDE. On a dedicated build host neither default helps:
+
+```sh
+clang-index build --compdb ... --clangd-jobs $(nproc) --clangd-boost
+```
+
+- `--clangd-jobs N` — forwarded as `-j=N`; sets clangd's worker count. `0` (default) keeps clangd's heuristic.
+- `--clangd-boost` — sets `--background-index-priority=normal` so the indexer competes equally with foreground work. Usually the bigger win.
+
+Note: cranking both means more concurrent disk I/O against `--background-index-path`; on slow storage that becomes the bottleneck before CPU does.
+
 ## Project layout
 
 ```

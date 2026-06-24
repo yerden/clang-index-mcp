@@ -50,6 +50,19 @@ type Options struct {
 	// disposable extraction (architecture §6.2 closing paragraph).
 	BackgroundIndexPath string
 
+	// Jobs, if > 0, is forwarded as -j=N to size clangd's async
+	// worker pool. Defaults (Jobs == 0) leave clangd's own choice in
+	// place — heavyweight_hardware_concurrency, ≈ half the logical
+	// cores. Crank to runtime.NumCPU() on dedicated build hosts.
+	Jobs int
+
+	// BackgroundIndexPriority, if non-empty, is forwarded as
+	// --background-index-priority. clangd's default is "background"
+	// (Linux: nice 19 + idle I/O); set "normal" on a build host that
+	// has no foreground IDE to share with — usually the bigger win
+	// over bumping Jobs.
+	BackgroundIndexPriority string
+
 	// Stderr receives clangd's stderr stream. nil → os.Stderr.
 	Stderr io.Writer
 
@@ -113,6 +126,12 @@ func Start(ctx context.Context, opts Options) (*Process, error) {
 			return nil, fmt.Errorf("mkdir background-index-path: %w", err)
 		}
 		args = append(args, "--background-index-path="+opts.BackgroundIndexPath)
+	}
+	if opts.Jobs > 0 {
+		args = append(args, fmt.Sprintf("-j=%d", opts.Jobs))
+	}
+	if opts.BackgroundIndexPriority != "" {
+		args = append(args, "--background-index-priority="+opts.BackgroundIndexPriority)
 	}
 	args = append(args, opts.ExtraArgs...)
 

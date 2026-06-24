@@ -196,6 +196,29 @@ Diagnostics:
 This suppresses all clang-tidy checks globally for clangd without
 affecting your editor's or CI's own clang-tidy runs.
 
+#### 6.4.2 Throughput knobs (build hosts vs. shared dev machines)
+clangd's defaults are tuned for an interactive IDE sharing a machine
+with the developer: the background-index worker pool sizes to
+`llvm::heavyweight_hardware_concurrency()` (≈ half the logical cores),
+and the indexer threads run at the OS's lowest scheduling/I/O priority
+("background" — Linux: nice 19 + idle I/O). Both make sense when a
+human is typing in the same process and the indexer must not steal
+cycles. On a dedicated build host neither does.
+
+Two flags are exposed on both `clang-index build` and
+`clangd-mcp-daemon`, and threaded into `clangdproc.Options`:
+
+- `--clangd-jobs N` → `-j=N`; overrides the worker-pool heuristic.
+- `--clangd-boost` → `--background-index-priority=normal`; lifts the
+  indexer to foreground scheduling priority.
+
+The boost flag is typically the larger win — the throttled priority
+caps wall-clock throughput regardless of how many workers you allocate.
+On a dedicated CI box, both together (`--clangd-jobs=$(nproc)
+--clangd-boost`) is the default to reach for. Note that more
+concurrency increases disk I/O against `--background-index-path`; on
+slow storage that becomes the binding constraint before CPU does.
+
 ### 6.5 Function-pointer dispatch: facts, not synthesized edges
 clangd's `callHierarchy/outgoingCalls` only resolves direct calls — it
 stops dead at every function-pointer dispatcher (`fn(x)` inside a

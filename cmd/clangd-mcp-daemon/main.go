@@ -40,6 +40,8 @@ func main() {
 	debounce := flag.Duration("debounce", 5*time.Second, "compdb-change debounce window (architecture §6.1)")
 	httpAddr := flag.String("http", "", "if non-empty, also serve MCP over Streamable HTTP on this address (e.g. :8080)")
 	httpPath := flag.String("http-path", "/mcp", "endpoint path for the Streamable HTTP transport")
+	clangdJobs := flag.Int("clangd-jobs", 0, "clangd -j=N worker count (0 = clangd's default, ≈ half the logical cores)")
+	clangdBoost := flag.Bool("clangd-boost", false, "run clangd's background indexer at normal OS priority instead of the default nice-19 \"background\" — recommended on a dedicated build host")
 	flag.Parse()
 
 	if *compdb == "" {
@@ -151,11 +153,16 @@ func main() {
 		return nil
 	}
 
-	d := clangdproc.NewDaemon(clangdproc.Options{
+	clangdOpts := clangdproc.Options{
 		Path:                *clangdPath,
 		CompileCommandsDir:  filepath.Dir(absCompDB),
 		BackgroundIndexPath: *bgIndexPath,
-	}, *debounce)
+		Jobs:                *clangdJobs,
+	}
+	if *clangdBoost {
+		clangdOpts.BackgroundIndexPriority = "normal"
+	}
+	d := clangdproc.NewDaemon(clangdOpts, *debounce)
 
 	wg.Add(1)
 	go func() {

@@ -60,6 +60,8 @@ func runBuild(args []string) int {
 	perFileRoot := fs.String("per-file-cache", "", "per-file cache root (empty = disabled)")
 	clangdPath := fs.String("clangd", "clangd", "clangd binary to spawn")
 	indexTimeout := fs.Duration("index-timeout", 5*time.Minute, "max time to wait for background indexing to settle")
+	clangdJobs := fs.Int("clangd-jobs", 0, "clangd -j=N worker count (0 = clangd's default, ≈ half the logical cores)")
+	clangdBoost := fs.Bool("clangd-boost", false, "run clangd's background indexer at normal OS priority instead of the default nice-19 \"background\" — recommended on a dedicated build host")
 	_ = fs.Parse(args)
 
 	if *compdb == "" {
@@ -113,10 +115,15 @@ func runBuild(args []string) int {
 
 	// `clang-index build` runs disposable extraction; no persistent
 	// background-index path is configured here per architecture §6.2.
-	proc, err := clangdproc.Start(ctx, clangdproc.Options{
+	clangdOpts := clangdproc.Options{
 		Path:               *clangdPath,
 		CompileCommandsDir: filepath.Dir(abs),
-	})
+		Jobs:               *clangdJobs,
+	}
+	if *clangdBoost {
+		clangdOpts.BackgroundIndexPriority = "normal"
+	}
+	proc, err := clangdproc.Start(ctx, clangdOpts)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "build: spawn clangd:", err)
 		return 1
