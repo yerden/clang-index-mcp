@@ -44,6 +44,18 @@ Categories, in precedence order (highest first):
   4. array_init:N[i?]   — stored into array N at slot i (index omitted
                           when it isn't a literal/named constant).
                           Dispatch tables.
+                          CAVEAT: i is the position in the enclosing
+                          InitList's child list, which equals the actual
+                          array slot ONLY for flat, fully-positional 1D
+                          initializers. For multidimensional arrays
+                          (` + "`t a[2][2] = {{x,y},{z,w}}`" + `) only the
+                          innermost-InitList index is recorded, so
+                          ` + "`z`" + ` is reported as ` + "`a[0]`" + ` and collides
+                          with ` + "`x`" + `. For array designators
+                          (` + "`t a[5] = {[3]=x}`" + `) and mixed positional/
+                          designator init lists, i is the source-order
+                          position, NOT the designated slot.
+                          Treat i as a hint, not a guaranteed array slot; the array name N is reliable.
 
   5. assigned_to:v      — plain scalar assignment / variable cinit.
                           Local flow; weaker signal.
@@ -89,7 +101,9 @@ func AddressTakeCategoryDescriptors() []addressTakeCategoryDescriptor {
 		{Name: "array_init", Rank: 4,
 			Description: "Stored into an array slot. Index omitted when not a literal.",
 			Example:     "static op_t ops[] = {square, cube}  →  array_init:ops[0]",
-			Guidance:    "Canonical dispatch table pattern."},
+			Guidance: "Canonical dispatch table pattern. The bracketed index is the position in the InitList's child list — it equals the actual array slot only for flat, fully-positional 1D initializers. " +
+				"Multi-dimensional arrays record only the innermost-InitList index (so the outer dimension is lost and distinct slots can collide); array designators (`[N]=expr`) and mixed positional/designator init lists report source-order position, not the designated slot. " +
+				"Treat the index as a hint; the array name is reliable."},
 		{Name: "assigned_to", Rank: 5,
 			Description: "Plain scalar assignment or variable cinit.",
 			Example:     "op_t fn = square  →  assigned_to:fn",

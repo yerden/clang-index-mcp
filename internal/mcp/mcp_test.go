@@ -168,6 +168,10 @@ func TestToolDescriptionsCarryAgentGuidance(t *testing.T) {
 		"typedef-spelled forms",
 		// Gap round 2 fix #3: callee_expr_pattern must explain how to use ".field" patterns.
 		"callee_expr has the shape",
+		// array_init index caveat: must warn the agent that the bracketed index
+		// is the InitList child position, not necessarily the actual array slot
+		// (multi-dim, designators, mixed positional/designator).
+		"Treat i as a hint, not a guaranteed array slot",
 	}
 	for _, m := range must {
 		if !jsonContains(resp, escapeJSON(m)) {
