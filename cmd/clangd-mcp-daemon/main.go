@@ -42,6 +42,7 @@ func main() {
 	httpPath := flag.String("http-path", "/mcp", "endpoint path for the Streamable HTTP transport")
 	clangdJobs := flag.Int("clangd-jobs", 0, "clangd -j=N worker count (0 = clangd's default, ≈ half the logical cores)")
 	clangdBoost := flag.Bool("clangd-boost", false, "run clangd's background indexer at normal OS priority instead of the default nice-19 \"background\" — recommended on a dedicated build host")
+	extractJobs := flag.Int("extract-jobs", 0, "max concurrent per-TU extraction workers (0 = NumCPU); feeds clangd parallel LSP requests so its worker threads aren't idle")
 	flag.Parse()
 
 	if *compdb == "" {
@@ -126,6 +127,7 @@ func main() {
 			CompDBPath:  absCompDB,
 			ProjectRoot: *projectRoot,
 			PerFile:     pf,
+			Jobs:        *extractJobs,
 			WaitForIndex: func(c context.Context) error {
 				waitCtx, cancel := context.WithTimeout(c, *indexTimeout)
 				defer cancel()

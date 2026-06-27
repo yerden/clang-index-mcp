@@ -20,7 +20,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/yerden/clang-index-mcp/internal/cache"
 	"github.com/yerden/clang-index-mcp/internal/lsp"
@@ -50,8 +53,16 @@ type Options struct {
 
 	// OnTUProgress, if non-nil, is invoked once per TU as the per-TU
 	// extraction loop advances: (done, total) with done in [1, total].
-	// Runs on Run's goroutine so callbacks must not block.
+	// May be called concurrently from worker goroutines — the callback
+	// must be safe for concurrent invocation and must not block.
 	OnTUProgress func(done, total int)
+
+	// Jobs caps concurrent per-TU extraction workers. <= 0 defaults to
+	// runtime.NumCPU(). One worker still works (sequential behavior);
+	// the dominant cost in a real project is waiting on clangd LSP
+	// round-trips, so feeding it parallel requests is what lets clangd
+	// actually use its worker threads.
+	Jobs int
 }
 
 // Result is the in-memory bundle ready for store.WriteIndexWithFacts.
@@ -135,7 +146,14 @@ func Run(ctx context.Context, cli *lsp.Client, opts Options) (*Result, error) {
 	// an unopened header silently disappears from the index. By opening
 	// it on demand the first time we hit such a callee, every later TU
 	// also benefits from the open (the set is shared across TUs).
+	//
+	// Called concurrently from per-TU workers — openMu guards
+	// openedSet/openedURIs and serializes the openTU call so two
+	// workers don't race-didOpen the same header.
+	var openMu sync.Mutex
 	ensureOpened := func(targetURI string) {
+		openMu.Lock()
+		defer openMu.Unlock()
 		if openedSet[targetURI] {
 			return
 		}
@@ -271,26 +289,85 @@ func Run(ctx context.Context, cli *lsp.Client, opts Options) (*Result, error) {
 		}
 	}
 
-	for i, plan := range plans {
+	// Parallel per-TU extraction. clangd is single-stream from our side
+	// only because the LSP write must be byte-serialized; request IDs
+	// let multiple Call() invocations be in flight simultaneously, and
+	// clangd dispatches across its worker threads. With sequential
+	// dispatch, clangd is pegged on one core and our process idles on
+	// the wire — feeding it parallel TU pipelines is what extracts the
+	// remaining throughput.
+	jobs := opts.Jobs
+	if jobs <= 0 {
+		jobs = runtime.NumCPU()
+	}
+	if jobs > len(plans) {
+		jobs = len(plans)
+	}
+
+	var (
+		aggMu    sync.Mutex
+		progress atomic.Int64
+		errOnce  sync.Once
+		firstErr error
+	)
+	total := len(plans)
+	reportProgress := func() {
+		done := int(progress.Add(1))
+		if opts.OnTUProgress != nil {
+			opts.OnTUProgress(done, total)
+		}
+	}
+	workCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	setErr := func(e error) {
+		errOnce.Do(func() {
+			firstErr = e
+			cancel()
+		})
+	}
+
+	sem := make(chan struct{}, jobs)
+	var wg sync.WaitGroup
+	for _, plan := range plans {
 		if plan.cached != nil {
+			// Cached payloads need no LSP work; aggregate inline. The
+			// lock is still required because workers spawned earlier
+			// may concurrently be appending their own payloads.
+			aggMu.Lock()
 			addPayload(plan.cached)
-			if opts.OnTUProgress != nil {
-				opts.OnTUProgress(i+1, len(plans))
-			}
+			aggMu.Unlock()
+			reportProgress()
 			continue
 		}
-		payload, err := extractTU(ctx, cli, plan.entry.AbsFile(), projectRoot, ensureOpened, sharedTypedefs)
-		if err != nil {
-			return nil, fmt.Errorf("extract %s: %w", plan.entry.AbsFile(), err)
+		if workCtx.Err() != nil {
+			break
 		}
-		if opts.PerFile != nil {
-			b, _ := json.Marshal(payload)
-			_ = opts.PerFile.Put(plan.key, &cache.PerFileEntry{Payload: b})
-		}
-		addPayload(payload)
-		if opts.OnTUProgress != nil {
-			opts.OnTUProgress(i+1, len(plans))
-		}
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(plan tuPlan) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if workCtx.Err() != nil {
+				return
+			}
+			payload, err := extractTU(workCtx, cli, plan.entry.AbsFile(), projectRoot, ensureOpened, sharedTypedefs)
+			if err != nil {
+				setErr(fmt.Errorf("extract %s: %w", plan.entry.AbsFile(), err))
+				return
+			}
+			if opts.PerFile != nil {
+				b, _ := json.Marshal(payload)
+				_ = opts.PerFile.Put(plan.key, &cache.PerFileEntry{Payload: b})
+			}
+			aggMu.Lock()
+			addPayload(payload)
+			aggMu.Unlock()
+			reportProgress()
+		}(plan)
+	}
+	wg.Wait()
+	if firstErr != nil {
+		return nil, firstErr
 	}
 
 	out := &Result{

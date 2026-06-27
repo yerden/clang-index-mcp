@@ -62,6 +62,7 @@ func runBuild(args []string) int {
 	indexTimeout := fs.Duration("index-timeout", 5*time.Minute, "max time to wait for background indexing to settle")
 	clangdJobs := fs.Int("clangd-jobs", 0, "clangd -j=N worker count (0 = clangd's default, ≈ half the logical cores)")
 	clangdBoost := fs.Bool("clangd-boost", false, "run clangd's background indexer at normal OS priority instead of the default nice-19 \"background\" — recommended on a dedicated build host")
+	extractJobs := fs.Int("extract-jobs", 0, "max concurrent per-TU extraction workers (0 = NumCPU); feeds clangd parallel LSP requests so its worker threads aren't idle")
 	_ = fs.Parse(args)
 
 	if *compdb == "" {
@@ -141,6 +142,7 @@ func runBuild(args []string) int {
 		CompDBPath:  abs,
 		ProjectRoot: *projectRoot,
 		PerFile:     pf,
+		Jobs:        *extractJobs,
 		WaitForIndex: func(c context.Context) error {
 			waitCtx, cancel := context.WithTimeout(c, *indexTimeout)
 			defer cancel()

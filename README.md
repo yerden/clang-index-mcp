@@ -111,19 +111,21 @@ Both layers key on raw-bytes digests — no normalization, no VCS dependency. Th
 
 ## Speeding up clangd's background index
 
-Both `clang-index build` and `clangd-mcp-daemon` accept three clangd-tuning flags. By default clangd sizes its worker pool to roughly *half* your logical cores and runs the indexer at the OS's lowest priority (Linux: nice 19 + idle I/O) so it doesn't fight with a foreground IDE. On a dedicated build host neither default helps:
+Both `clang-index build` and `clangd-mcp-daemon` accept several tuning flags. By default clangd sizes its worker pool to roughly *half* your logical cores and runs the indexer at the OS's lowest priority (Linux: nice 19 + idle I/O) so it doesn't fight with a foreground IDE. On a dedicated build host neither default helps:
 
 ```sh
 clang-index build --compdb ... \
   --background-index-path ~/.cache/clang-index-mcp/clangd-shards \
-  --clangd-jobs $(nproc) --clangd-boost
+  --clangd-jobs $(nproc) --clangd-boost \
+  --extract-jobs $(nproc)
 ```
 
 - `--background-index-path DIR` — clangd's own shard cache. On the first run clangd indexes from cold; on subsequent runs it reuses shards keyed on per-file `(content, command)`, so unchanged TUs are skipped at the indexer level (architecture §6.2). Off by default on `build` because the architectural framing is one-shot CI extraction; opt in for iterative dev loops. The daemon takes the same flag and is the recommended path for live work.
 - `--clangd-jobs N` — forwarded as `-j=N`; sets clangd's worker count. `0` (default) keeps clangd's heuristic.
 - `--clangd-boost` — sets `--background-index-priority=normal` so the indexer competes equally with foreground work. Usually the bigger win.
+- `--extract-jobs N` — max concurrent per-TU extraction workers (default `NumCPU`). We dispatch parallel LSP requests to clangd; without this, clangd's worker threads sit idle waiting on our next sequential call. Usually the biggest win on the extraction phase of large projects.
 
-Note: cranking workers means more concurrent disk I/O against `--background-index-path`; on slow storage that becomes the bottleneck before CPU does.
+Note: cranking workers means more concurrent disk I/O against `--background-index-path` and higher clangd RSS (multiple in-flight ASTs); on slow storage or tight-memory hosts that becomes the bottleneck before CPU does.
 
 ## Project layout
 
