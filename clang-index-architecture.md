@@ -141,8 +141,13 @@ the default ephemeral path. On restart, clangd reuses on-disk shards keyed
 by per-file content+command digest, so only changed/new files get
 re-indexed — most restarts become warm starts. A global compile-flag
 change still invalidates broadly, since the digest includes the command.
-Opposite policy from `clang-index build`'s pipeline, which discards its
-index cache after each run since that's a disposable, isolated extraction.
+Opposite *default* from `clang-index build`'s pipeline, which discards
+its index cache after each run since that's framed as a disposable,
+isolated extraction. `clang-index build` may also opt into persisted
+shards by passing the same `--background-index-path` flag — useful when
+the binary is run iteratively (dev loop) rather than once (CI snapshot).
+The architectural policy is the same in both cases; only the default
+differs.
 
 This applies equally to both restart triggers the daemon has: a
 compdb-change-driven restart (§6.1) and a full daemon-process restart
