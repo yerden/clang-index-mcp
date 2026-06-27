@@ -33,7 +33,7 @@ func main() {
 	compdb := flag.String("compdb", "", "path to compile_commands.json (required)")
 	projectRoot := flag.String("project-root", "", "project root (file paths stored relative to this); default: compdb's directory")
 	bgIndexPath := flag.String("background-index-path", "", "persistent clangd background-index dir (architecture §6.2)")
-	perFileRoot := flag.String("per-file-cache", "", "per-file extraction cache dir (empty = disabled)")
+	cacheRoot := flag.String("cache", "", "cache root for per-TU extraction (empty = disabled); shares the per-file/ subdir layout with `clang-index build -cache`")
 	clangdPath := flag.String("clangd", "clangd", "clangd binary")
 	indexTimeout := flag.Duration("index-timeout", 5*time.Minute, "max time to wait for clangd's background-index settle on each restart")
 	dbDir := flag.String("db-dir", ".", "where to write rebuilt index.db files")
@@ -59,7 +59,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	pf, err := cache.NewPerFile(*perFileRoot)
+	pf, err := cache.NewPerFile(cache.PerFileSubdir(*cacheRoot))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "per-file cache:", err)
 		os.Exit(1)

@@ -8,6 +8,14 @@
 // Both layers key purely on raw-bytes content digests; no source-control
 // identity is involved (architecture §7). No eviction policy is provided —
 // manual nuke-and-rebuild is the accepted fallback (architecture §6.3).
+//
+// Layout on disk: both layers live under one user-facing cache root,
+// split into "whole/" and "per-file/" subdirs (see WholeBuildSubdir /
+// PerFileSubdir). The two subdirs are independent on the hot path — a
+// whole-build hit short-circuits before clangd starts and never consults
+// per-file; per-file is consulted inside extract.Run only on whole-build
+// miss. Sharing the parent dir means a single nuke clears both layers,
+// which is the right behavior after a schema change (CLAUDE.md §17).
 package cache
 
 import (
@@ -59,6 +67,24 @@ func SumStrings(parts ...string) Digest {
 		h.Write([]byte(p))
 	}
 	return Digest(hex.EncodeToString(h.Sum(nil)))
+}
+
+// WholeBuildSubdir returns the conventional whole-build subdirectory
+// under a unified cache root. Empty root → empty (cache disabled).
+func WholeBuildSubdir(root string) string {
+	if root == "" {
+		return ""
+	}
+	return filepath.Join(root, "whole")
+}
+
+// PerFileSubdir returns the conventional per-file subdirectory under a
+// unified cache root. Empty root → empty (cache disabled).
+func PerFileSubdir(root string) string {
+	if root == "" {
+		return ""
+	}
+	return filepath.Join(root, "per-file")
 }
 
 // WholeBuild is the build-level cache. The on-disk layout is one file per

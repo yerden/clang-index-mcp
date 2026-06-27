@@ -94,19 +94,20 @@ For HTTP clients, point them at `http://host:8080/mcp` — Streamable HTTP retur
 
 ## Caching
 
-`clang-index build` is disposable by default — every run cold-starts clangd and re-extracts every TU. Two opt-in caches change that:
+`clang-index build` is disposable by default — every run cold-starts clangd and re-extracts every TU. One opt-in cache flag enables both layers:
 
 ```sh
-# Whole-build cache: if (compdb + every file's content) is unchanged,
-# skip clangd entirely and copy the cached index.db.
-clang-index build --compdb ... --out index.db --cache ~/.cache/clang-index-mcp/wb
-
-# Per-file cache: only TUs whose (content + compile command) changed
-# get re-extracted. Useful for incremental local builds.
-clang-index build --compdb ... --out index.db --per-file-cache ~/.cache/clang-index-mcp/pf
+clang-index build --compdb ... --out index.db --cache ~/.cache/clang-index-mcp
 ```
 
-Both caches are keyed on raw-bytes digests — no normalization, no VCS dependency. The known limitation: per-file keys don't include transitively-included header content, so editing a shared header is invisible to the cache. Workaround: nuke the cache directory. See [architecture §7](clang-index-architecture.md#7-caching--content-digest-keyed-no-vcs-dependency).
+Under that root, two subdirs hold the two layers:
+
+- `whole/` — if `(compdb + every file's content)` is unchanged, skip clangd entirely and copy the cached `index.db`.
+- `per-file/` — on a whole-build miss, only TUs whose `(content + compile command)` changed get re-extracted; the rest are replayed from JSON.
+
+`clangd-mcp-daemon` accepts the same `-cache` flag and uses the `per-file/` subdir (it doesn't produce a frozen artifact, so whole-build doesn't apply). Pointing both binaries at the same root lets them share per-file work.
+
+Both layers key on raw-bytes digests — no normalization, no VCS dependency. The known limitation: per-file keys don't include transitively-included header content, so editing a shared header is invisible to the cache. Workaround: `rm -rf` the cache root. See [architecture §7](clang-index-architecture.md#7-caching--content-digest-keyed-no-vcs-dependency).
 
 ## Speeding up clangd's background index
 

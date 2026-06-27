@@ -187,32 +187,47 @@ func TestBuildWholeBuildCache(t *testing.T) {
 	}
 }
 
-// TestBuildPerFileCache asserts:
-//   - first build with --per-file-cache populates the cache
-//   - second build with the same inputs is fast enough that we know
-//     clangd's TU pipeline was skipped: the only work left is process
-//     spawn + LSP init, which on this fixture is well under 1s. Cold
-//     extraction is dominated by indexer settle, ~80–150ms; we set a
-//     generous 2s upper bound to stay non-flaky on slow CI.
+// TestBuildPerFileCache asserts the per-file fast-path independently of
+// the whole-build layer, even though they now share a cache root:
+//
+//   - first build populates the merged cache; we sanity-check that the
+//     per-file/ subdir got one entry per TU.
+//   - we re-serialize the compdb with different whitespace, which changes
+//     its raw-bytes digest (→ whole-build miss) but leaves each TU's
+//     parsed (Directory, Arguments) untouched (→ per-file hit).
+//   - the second build is fast enough that we know clangd's TU pipeline
+//     was skipped: the only work left is process spawn + LSP init, which
+//     on this fixture is well under 1s. Cold extraction is dominated by
+//     indexer settle, ~80–150ms; we set a generous 2s upper bound to
+//     stay non-flaky on slow CI.
 //   - both produced DBs report the same symbol via a serve search.
 func TestBuildPerFileCache(t *testing.T) {
 	f := setupFixture(t)
-	cacheDir := filepath.Join(f.tmp, "pf-cache")
+	cacheDir := filepath.Join(f.tmp, "cache")
 	db1 := filepath.Join(f.tmp, "pf1.db")
 	db2 := filepath.Join(f.tmp, "pf2.db")
 
-	_, _ = f.runBuild(t, db1, "--per-file-cache", cacheDir)
-	entries, err := os.ReadDir(cacheDir)
+	_, _ = f.runBuild(t, db1, "--cache", cacheDir)
+	pfDir := filepath.Join(cacheDir, "per-file")
+	entries, err := os.ReadDir(pfDir)
 	if err != nil || len(entries) == 0 {
 		t.Fatalf("per-file cache dir empty after first build: %v", err)
 	}
 
-	// Verify the cache directory has one entry per TU in the fixture (3).
+	// Verify the per-file subdir has one entry per TU in the fixture (3).
 	if len(entries) != 3 {
 		t.Errorf("expected 3 per-file cache entries (one per TU), got %d", len(entries))
 	}
 
-	hitElapsed, _ := f.runBuild(t, db2, "--per-file-cache", cacheDir)
+	// Re-serialize the compdb with different formatting so whole-build's
+	// raw-bytes digest changes; per-file keys are over parsed (Directory,
+	// Arguments) and are unaffected.
+	reserializeCompDB(t, f.compdb)
+
+	hitElapsed, stderr2 := f.runBuild(t, db2, "--cache", cacheDir)
+	if strings.Contains(stderr2, "whole-build cache hit") {
+		t.Fatalf("compdb reserialization should have invalidated whole-build; stderr=%q", stderr2)
+	}
 	if hitElapsed > 2*time.Second {
 		t.Errorf("per-file cache hit took %s; expected well under 2s (bug: maybe WaitForIndex still being called on all-cached path)", hitElapsed)
 	}
@@ -225,6 +240,33 @@ func TestBuildPerFileCache(t *testing.T) {
 	}
 	if !bytes.Contains(got2, []byte("factorial")) {
 		t.Fatalf("cached DB missing factorial: %s", got2)
+	}
+}
+
+// reserializeCompDB rewrites compile_commands.json with different
+// whitespace, changing its raw-bytes content while preserving parsed
+// equivalence. Used to invalidate whole-build's input digest without
+// touching per-file keys.
+func reserializeCompDB(t *testing.T, path string) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		t.Fatal(err)
+	}
+	// Re-encode compact (no indent) — different bytes, same parsed value.
+	out, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(out, raw) {
+		t.Fatal("reserialize produced identical bytes; pick a different formatting")
+	}
+	if err := os.WriteFile(path, out, 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 

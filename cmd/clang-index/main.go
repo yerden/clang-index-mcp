@@ -56,8 +56,7 @@ func runBuild(args []string) int {
 	compdb := fs.String("compdb", "", "path to compile_commands.json (required)")
 	out := fs.String("out", "index.db", "output index.db path")
 	projectRoot := fs.String("project-root", "", "project root (file paths are stored relative to this); default: compdb's directory")
-	cacheRoot := fs.String("cache", "", "whole-build cache root (empty = disabled)")
-	perFileRoot := fs.String("per-file-cache", "", "per-file cache root (empty = disabled)")
+	cacheRoot := fs.String("cache", "", "cache root for both the whole-build artifact and per-TU extraction (empty = disabled); subdirs whole/ and per-file/ are created underneath")
 	clangdPath := fs.String("clangd", "clangd", "clangd binary to spawn")
 	indexTimeout := fs.Duration("index-timeout", 5*time.Minute, "max time to wait for background indexing to settle")
 	clangdJobs := fs.Int("clangd-jobs", 0, "clangd -j=N worker count (0 = clangd's default, ≈ half the logical cores)")
@@ -78,7 +77,7 @@ func runBuild(args []string) int {
 	defer cancel()
 
 	// Whole-build cache lookup (architecture §7.1).
-	wb, err := cache.NewWholeBuild(*cacheRoot)
+	wb, err := cache.NewWholeBuild(cache.WholeBuildSubdir(*cacheRoot))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "build: cache init:", err)
 		return 1
@@ -107,7 +106,7 @@ func runBuild(args []string) int {
 	}
 
 	// Per-file cache (architecture §7.2).
-	pf, err := cache.NewPerFile(*perFileRoot)
+	pf, err := cache.NewPerFile(cache.PerFileSubdir(*cacheRoot))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "build: per-file cache init:", err)
 		return 1
