@@ -83,12 +83,12 @@ func runBuild(args []string) int {
 		fmt.Fprintln(os.Stderr, "build: cache init:", err)
 		return 1
 	}
-	entries, raw, err := extract.LoadCompDB(abs)
+	entries, err := extract.LoadCompDB(abs)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "build: load compdb:", err)
 		return 1
 	}
-	compdbDigest := cache.Sum(raw)
+	compdbDigest := extract.CompDBDigest(entries)
 	fileDigests := make(map[string]cache.Digest, len(entries))
 	for _, e := range entries {
 		fd, err := cache.SumFile(e.AbsFile())

@@ -371,12 +371,24 @@ Two granularities of the same idea, both keyed purely on content/command
 digests rather than any source-control identity:
 
 ### 7.1 Whole-build cache (`cache` + `clang-index build`)
-Before running the full clangd pipeline, check whether a digest (raw bytes,
-no normalization — same convention as §7.2) of the current input state
-(compdb content + referenced file contents) already
-has a corresponding `index.db`. On hit, skip clangd/extraction entirely and
-reuse it — useful for repeated builds against an unchanged input snapshot.
-On miss, run the pipeline and store the result under that digest.
+Before running the full clangd pipeline, check whether a digest of the
+current input state (compdb structure + referenced file contents)
+already has a corresponding `index.db`. On hit, skip clangd/extraction
+entirely and reuse it — useful for repeated builds against an
+unchanged input snapshot. On miss, run the pipeline and store the
+result under that digest.
+
+The compdb half is *parsed* and normalized (entries sorted by absolute
+file path; each entry digested through the same `(Directory, Arguments)`
+form the per-file cache uses) rather than hashed as raw bytes. This is
+a conscious divergence from §7.2's "no normalization" rule, which
+applies to source-file content. The compdb is structured metadata
+produced by a build system, not source code: CMake/Bazel/Bear
+regenerate `compile_commands.json` on every reconfigure with timestamps,
+graph-traversal ordering, and formatting choices that vary across runs
+even when no actual command changed. Hashing raw bytes makes every CI
+run miss the whole-build cache for no reason; canonicalizing the
+parsed structure tracks what the cache key actually needs to track.
 
 ### 7.2 Per-file extraction cache (`cache` used inside `extract`)
 Within a single build that does run, cache extraction results per file

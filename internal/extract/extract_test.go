@@ -52,6 +52,42 @@ func TestCompDBAbsFile(t *testing.T) {
 	}
 }
 
+func TestCompDBDigest_StableUnderReordering(t *testing.T) {
+	a := []CompDBEntry{
+		{Directory: "/w", File: "a.c", Arguments: []string{"clang", "-c", "a.c"}},
+		{Directory: "/w", File: "b.c", Arguments: []string{"clang", "-c", "b.c"}},
+		{Directory: "/w", File: "c.c", Arguments: []string{"clang", "-c", "c.c"}},
+	}
+	b := []CompDBEntry{a[2], a[0], a[1]}
+	if CompDBDigest(a) != CompDBDigest(b) {
+		t.Fatalf("entry order changed the digest:\n  a=%s\n  b=%s", CompDBDigest(a), CompDBDigest(b))
+	}
+}
+
+func TestCompDBDigest_SensitiveToCommandChange(t *testing.T) {
+	a := []CompDBEntry{
+		{Directory: "/w", File: "a.c", Arguments: []string{"clang", "-c", "a.c"}},
+	}
+	b := []CompDBEntry{
+		{Directory: "/w", File: "a.c", Arguments: []string{"clang", "-O2", "-c", "a.c"}},
+	}
+	if CompDBDigest(a) == CompDBDigest(b) {
+		t.Fatalf("argument change didn't change digest")
+	}
+}
+
+func TestCompDBDigest_SensitiveToFileChange(t *testing.T) {
+	a := []CompDBEntry{
+		{Directory: "/w", File: "a.c", Arguments: []string{"clang", "-c", "a.c"}},
+	}
+	b := []CompDBEntry{
+		{Directory: "/w", File: "b.c", Arguments: []string{"clang", "-c", "a.c"}},
+	}
+	if CompDBDigest(a) == CompDBDigest(b) {
+		t.Fatalf("file change didn't change digest")
+	}
+}
+
 func TestExtractSignatureFromHover_PlaintextMarkup(t *testing.T) {
 	body := []byte(`{"kind":"plaintext","value":"function dispatch\n\nprovided by \"shared.h\"\n\n→ int\n\nParameters:\n\n- op_t fn (aka int (*)(int))\n- int x\n\nint dispatch(op_t fn, int x)"}`)
 	got := extractSignatureFromHover(body)

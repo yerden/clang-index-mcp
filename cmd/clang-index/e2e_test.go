@@ -192,9 +192,11 @@ func TestBuildWholeBuildCache(t *testing.T) {
 //
 //   - first build populates the merged cache; we sanity-check that the
 //     per-file/ subdir got one entry per TU.
-//   - we re-serialize the compdb with different whitespace, which changes
-//     its raw-bytes digest (→ whole-build miss) but leaves each TU's
-//     parsed (Directory, Arguments) untouched (→ per-file hit).
+//   - we drop a TU from the compdb. Whole-build's input digest covers
+//     the entire (compdb structure + per-file content) set, so a
+//     different fileset invalidates it. The two remaining TUs still
+//     have unchanged (Directory, Arguments) and content, so per-file
+//     hits for both.
 //   - the second build is fast enough that we know clangd's TU pipeline
 //     was skipped: the only work left is process spawn + LSP init, which
 //     on this fixture is well under 1s. Cold extraction is dominated by
@@ -219,14 +221,14 @@ func TestBuildPerFileCache(t *testing.T) {
 		t.Errorf("expected 3 per-file cache entries (one per TU), got %d", len(entries))
 	}
 
-	// Re-serialize the compdb with different formatting so whole-build's
-	// raw-bytes digest changes; per-file keys are over parsed (Directory,
-	// Arguments) and are unaffected.
-	reserializeCompDB(t, f.compdb)
+	// Drop the last compdb entry so whole-build's input digest changes
+	// (different TU set) while the remaining entries keep identical
+	// (Directory, Arguments) → per-file hits for them.
+	dropLastCompDBEntry(t, f.compdb)
 
 	hitElapsed, stderr2 := f.runBuild(t, db2, "--cache", cacheDir)
 	if strings.Contains(stderr2, "whole-build cache hit") {
-		t.Fatalf("compdb reserialization should have invalidated whole-build; stderr=%q", stderr2)
+		t.Fatalf("dropping a TU should have invalidated whole-build; stderr=%q", stderr2)
 	}
 	if hitElapsed > 2*time.Second {
 		t.Errorf("per-file cache hit took %s; expected well under 2s (bug: maybe WaitForIndex still being called on all-cached path)", hitElapsed)
@@ -243,27 +245,26 @@ func TestBuildPerFileCache(t *testing.T) {
 	}
 }
 
-// reserializeCompDB rewrites compile_commands.json with different
-// whitespace, changing its raw-bytes content while preserving parsed
-// equivalence. Used to invalidate whole-build's input digest without
-// touching per-file keys.
-func reserializeCompDB(t *testing.T, path string) {
+// dropLastCompDBEntry rewrites compile_commands.json without its last
+// entry. Used to invalidate whole-build's input digest in a way that
+// leaves the remaining per-file cache entries valid.
+func dropLastCompDBEntry(t *testing.T, path string) {
 	t.Helper()
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var v any
-	if err := json.Unmarshal(raw, &v); err != nil {
+	var entries []map[string]any
+	if err := json.Unmarshal(raw, &entries); err != nil {
 		t.Fatal(err)
 	}
-	// Re-encode compact (no indent) — different bytes, same parsed value.
-	out, err := json.Marshal(v)
+	if len(entries) < 2 {
+		t.Fatalf("need at least 2 entries to drop one; got %d", len(entries))
+	}
+	entries = entries[:len(entries)-1]
+	out, err := json.Marshal(entries)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if bytes.Equal(out, raw) {
-		t.Fatal("reserialize produced identical bytes; pick a different formatting")
 	}
 	if err := os.WriteFile(path, out, 0o644); err != nil {
 		t.Fatal(err)

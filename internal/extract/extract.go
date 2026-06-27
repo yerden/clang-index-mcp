@@ -88,7 +88,7 @@ type tuPayload struct {
 // other than USR/Name/Kind, which are stable). Edges are deduped on the
 // (caller, callee) USR pair.
 func Run(ctx context.Context, cli *lsp.Client, opts Options) (*Result, error) {
-	entries, _, err := LoadCompDB(opts.CompDBPath)
+	entries, err := LoadCompDB(opts.CompDBPath)
 	if err != nil {
 		return nil, fmt.Errorf("load compdb: %w", err)
 	}
