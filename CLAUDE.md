@@ -71,8 +71,8 @@ Dependency map:
 18. **Whole-build cache lookup must include every file referenced by the compdb**, not just the TUs. `cmd/clang-index/main.go` does this. If you change the compdb walker, keep the input-digest input set in sync.
 
 ### Daemon
-19. **Restart over notify** (§6.1). Don't implement `workspace/didChangeWatchedFiles`. When compdb changes, the daemon debounces (5s) and restarts clangd. The new clangd reuses on-disk shards via `--background-index-path` (§6.2).
-20. **`--background-index-path` must be on persistent storage.** If it's container-ephemeral, every restart cold-starts; the persistence policy in §6.2 then doesn't apply.
+19. **Restart over notify** (§6.1). Don't implement `workspace/didChangeWatchedFiles`. When compdb changes, the daemon debounces (5s) and restarts clangd. The new clangd reuses on-disk shards that clangd persists automatically under `<compdb-dir>/.cache/clangd/index/` (§6.2).
+20. **clangd's shard directory must survive restarts.** Path is fixed at `<compdb-dir>/.cache/clangd/index/` — clangd has no flag to relocate it; do not try to invent one (`--background-index-path` is not a real clangd flag and clangd will refuse to start). If that directory is container-ephemeral or wiped between CI runs, every restart cold-starts; the persistence policy in §6.2 then doesn't apply.
 
 ## Testing
 
