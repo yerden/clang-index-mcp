@@ -61,7 +61,6 @@ Run on your dev machine, natively (not in a container — toolchain/header parit
 clangd-mcp-daemon \
   --compdb /path/to/compile_commands.json \
   --project-root /path/to/project \
-  --background-index-path ~/.cache/clang-index-mcp/bgindex \
   --http :8080
 ```
 
@@ -111,21 +110,21 @@ Both layers key on raw-bytes digests — no normalization, no VCS dependency. Th
 
 ## Speeding up clangd's background index
 
-Both `clang-index build` and `clangd-mcp-daemon` accept several tuning flags. By default clangd sizes its worker pool to roughly *half* your logical cores and runs the indexer at the OS's lowest priority (Linux: nice 19 + idle I/O) so it doesn't fight with a foreground IDE. On a dedicated build host neither default helps:
+Both `clang-index build` and `clangd-mcp-daemon` accept tuning flags. By default clangd sizes its worker pool to roughly *half* your logical cores and runs the indexer at the OS's lowest priority (Linux: nice 19 + idle I/O) so it doesn't fight with a foreground IDE. On a dedicated build host neither default helps:
 
 ```sh
 clang-index build --compdb ... \
-  --background-index-path ~/.cache/clang-index-mcp/clangd-shards \
   --clangd-jobs $(nproc) --clangd-boost \
   --extract-jobs $(nproc)
 ```
 
-- `--background-index-path DIR` — clangd's own shard cache. On the first run clangd indexes from cold; on subsequent runs it reuses shards keyed on per-file `(content, command)`, so unchanged TUs are skipped at the indexer level (architecture §6.2). Off by default on `build` because the architectural framing is one-shot CI extraction; opt in for iterative dev loops. The daemon takes the same flag and is the recommended path for live work.
 - `--clangd-jobs N` — forwarded as `-j=N`; sets clangd's worker count. `0` (default) keeps clangd's heuristic.
 - `--clangd-boost` — sets `--background-index-priority=normal` so the indexer competes equally with foreground work. Usually the bigger win.
 - `--extract-jobs N` — max concurrent per-TU extraction workers (default `NumCPU`). We dispatch parallel LSP requests to clangd; without this, clangd's worker threads sit idle waiting on our next sequential call. Usually the biggest win on the extraction phase of large projects.
 
-Note: cranking workers means more concurrent disk I/O against `--background-index-path` and higher clangd RSS (multiple in-flight ASTs); on slow storage or tight-memory hosts that becomes the bottleneck before CPU does.
+clangd's background indexer is on by default and persists shards under `<compdb-dir>/.cache/clangd/index/` automatically (the path is fixed by clangd — there is no flag to relocate it). On subsequent runs clangd reuses those shards keyed on per-file `(content, command)`, so unchanged TUs are skipped at the indexer level (architecture §6.2). For CI: cache that directory across runs to get warm starts.
+
+Note: cranking workers means more concurrent disk I/O against the shard directory and higher clangd RSS (multiple in-flight ASTs); on slow storage or tight-memory hosts that becomes the bottleneck before CPU does.
 
 ## Project layout
 
@@ -165,7 +164,7 @@ Sketches, not commitments — captured here so the design tradeoffs aren't re-li
 
 ### Source-tree file watching
 
-Today the daemon only watches `compile_commands.json`; source edits don't refresh the served DB until the next compdb event. A natural extension is to add a second fsnotify watcher over the project tree — every modify/create/delete on a `.c`/`.cpp`/`.h` would pulse the same debounced `Daemon.Restart()` we already use for compdb changes. Per-file extraction cache and clangd's `--background-index-path` shards both ensure unchanged TUs aren't re-extracted, so a single source edit costs one TU's worth of clangd work, not a full reindex. Trade-off: header edits invalidate broadly (the per-file cache key intentionally doesn't track transitive includes, §7.2), and editor save-storms during refactors would cause restart churn; the existing 5 s debounce (§6.1) is the lever to tune. Status quo workaround: re-run the build system to regenerate `compile_commands.json`.
+Today the daemon only watches `compile_commands.json`; source edits don't refresh the served DB until the next compdb event. A natural extension is to add a second fsnotify watcher over the project tree — every modify/create/delete on a `.c`/`.cpp`/`.h` would pulse the same debounced `Daemon.Restart()` we already use for compdb changes. Per-file extraction cache and clangd's persisted shards (at `<compdb-dir>/.cache/clangd/index/`) both ensure unchanged TUs aren't re-extracted, so a single source edit costs one TU's worth of clangd work, not a full reindex. Trade-off: header edits invalidate broadly (the per-file cache key intentionally doesn't track transitive includes, §7.2), and editor save-storms during refactors would cause restart churn; the existing 5 s debounce (§6.1) is the lever to tune. Status quo workaround: re-run the build system to regenerate `compile_commands.json`.
 
 ### Function-pointer-aware call edges
 

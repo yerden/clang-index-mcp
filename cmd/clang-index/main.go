@@ -58,7 +58,6 @@ func runBuild(args []string) int {
 	projectRoot := fs.String("project-root", "", "project root (file paths are stored relative to this); default: compdb's directory")
 	cacheRoot := fs.String("cache", "", "cache root for both the whole-build artifact and per-TU extraction (empty = disabled); subdirs whole/ and per-file/ are created underneath")
 	clangdPath := fs.String("clangd", "clangd", "clangd binary to spawn")
-	bgIndexPath := fs.String("background-index-path", "", "persistent clangd background-index dir (architecture §6.2); off by default since `build` is treated as a one-shot, but opt in for iterative dev loops to warm-start the indexer across runs")
 	indexTimeout := fs.Duration("index-timeout", 5*time.Minute, "max time to wait for background indexing to settle")
 	clangdJobs := fs.Int("clangd-jobs", 0, "clangd -j=N worker count (0 = clangd's default, ≈ half the logical cores)")
 	clangdBoost := fs.Bool("clangd-boost", false, "run clangd's background indexer at normal OS priority instead of the default nice-19 \"background\" — recommended on a dedicated build host")
@@ -114,15 +113,12 @@ func runBuild(args []string) int {
 		return 1
 	}
 
-	// `clang-index build` defaults to disposable extraction per
-	// architecture §6.2 (CI-style one-shot). When -background-index-path
-	// is set, we opt into the daemon's warm-restart policy so iterative
-	// dev-loop rebuilds reuse clangd's on-disk shards.
+	// `clang-index build` runs disposable extraction; no persistent
+	// background-index path is configured here per architecture §6.2.
 	clangdOpts := clangdproc.Options{
-		Path:                *clangdPath,
-		CompileCommandsDir:  filepath.Dir(abs),
-		BackgroundIndexPath: *bgIndexPath,
-		Jobs:                *clangdJobs,
+		Path:               *clangdPath,
+		CompileCommandsDir: filepath.Dir(abs),
+		Jobs:               *clangdJobs,
 	}
 	if *clangdBoost {
 		clangdOpts.BackgroundIndexPriority = "normal"
