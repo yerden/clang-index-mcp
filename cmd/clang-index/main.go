@@ -65,7 +65,7 @@ func runBuild(args []string) int {
 	_ = fs.Parse(args)
 
 	if *compdb == "" {
-		fmt.Fprintln(os.Stderr, "build: --compdb is required")
+		fmt.Fprintln(os.Stderr, "build: -compdb is required")
 		return 2
 	}
 	abs, err := filepath.Abs(*compdb)

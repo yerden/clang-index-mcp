@@ -45,7 +45,7 @@ func main() {
 	flag.Parse()
 
 	if *compdb == "" {
-		fmt.Fprintln(os.Stderr, "clangd-mcp-daemon: --compdb is required")
+		fmt.Fprintln(os.Stderr, "clangd-mcp-daemon: -compdb is required")
 		os.Exit(2)
 	}
 	absCompDB, err := filepath.Abs(*compdb)
@@ -81,7 +81,7 @@ func main() {
 	srv := mcp.New(st, "clangd-mcp-daemon")
 
 	// The daemon serves exactly one MCP transport: Streamable HTTP if
-	// --http is set, stdio otherwise. Running both at once would let a
+	// -http is set, stdio otherwise. Running both at once would let a
 	// stdio client and an HTTP client share a single in-memory DB
 	// without any access-control story, and clients picking up the
 	// wrong endpoint silently is exactly the kind of foot-gun we'd
