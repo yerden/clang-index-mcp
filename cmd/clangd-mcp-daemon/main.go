@@ -32,7 +32,7 @@ import (
 func main() {
 	compdb := flag.String("compdb", "", "path to compile_commands.json (required)")
 	projectRoot := flag.String("project-root", "", "project root (file paths stored relative to this); default: compdb's directory")
-	bgIndex := flag.Bool("background-index", true, "forwarded as clangd's --background-index; default true. Shards live at <compdb-dir>/.cache/clangd/index/ — cache that directory across daemon restarts to get warm starts (architecture §6.2). The path is fixed by clangd; there is no flag to relocate it.")
+	bgIndexPath := flag.String("background-index-path", "", "persistent clangd background-index dir (architecture §6.2)")
 	cacheRoot := flag.String("cache", "", "cache root for per-TU extraction (empty = disabled); shares the per-file/ subdir layout with `clang-index build -cache`")
 	clangdPath := flag.String("clangd", "clangd", "clangd binary")
 	indexTimeout := flag.Duration("index-timeout", 5*time.Minute, "max time to wait for clangd's background-index settle on each restart")
@@ -156,10 +156,10 @@ func main() {
 	}
 
 	clangdOpts := clangdproc.Options{
-		Path:                   *clangdPath,
-		CompileCommandsDir:     filepath.Dir(absCompDB),
-		DisableBackgroundIndex: !*bgIndex,
-		Jobs:                   *clangdJobs,
+		Path:                *clangdPath,
+		CompileCommandsDir:  filepath.Dir(absCompDB),
+		BackgroundIndexPath: *bgIndexPath,
+		Jobs:                *clangdJobs,
 	}
 	if *clangdBoost {
 		clangdOpts.BackgroundIndexPriority = "normal"

@@ -2,8 +2,7 @@
 // it to higher layers as an LSP client. It owns:
 //
 //   - process lifecycle (Start, Stop, Wait)
-//   - clangd-flavor extras: --background-index toggle (clangd persists
-//     shards automatically under <compdb-dir>/.cache/clangd/index/),
+//   - clangd-flavor extras: --background-index-path persistence,
 //     waiting for the "indexed" progress signal before letting callers
 //     begin extraction
 //   - a thin Daemon wrapper that adds debounced restart-on-compdb-change
@@ -45,15 +44,11 @@ type Options struct {
 	// Passed as --compile-commands-dir.
 	CompileCommandsDir string
 
-	// DisableBackgroundIndex turns off clangd's background indexer.
-	// Zero value (false) leaves clangd's default in place, which is
-	// --background-index=true: shards are written and reused at
-	// <CompileCommandsDir>/.cache/clangd/index/ automatically (clangd
-	// derives the location itself; there's no flag to relocate it).
-	// Architecture §6.2: persistence is the desired behavior on both
-	// the daemon and iterative `clang-index build` runs — cache that
-	// directory in CI to get warm restarts.
-	DisableBackgroundIndex bool
+	// BackgroundIndexPath, if non-empty, is forwarded as
+	// --background-index-path so shards persist across restarts
+	// (architecture §6.2). For `clang-index build` leave this empty —
+	// disposable extraction (architecture §6.2 closing paragraph).
+	BackgroundIndexPath string
 
 	// Jobs, if > 0, is forwarded as -j=N to size clangd's async
 	// worker pool. Defaults (Jobs == 0) leave clangd's own choice in
@@ -125,8 +120,12 @@ func Start(ctx context.Context, opts Options) (*Process, error) {
 	if opts.CompileCommandsDir != "" {
 		args = append(args, "--compile-commands-dir="+opts.CompileCommandsDir)
 	}
-	if opts.DisableBackgroundIndex {
-		args = append(args, "--background-index=false")
+	if opts.BackgroundIndexPath != "" {
+		// Ensure the directory exists so clangd doesn't silently skip persistence.
+		if err := os.MkdirAll(opts.BackgroundIndexPath, 0o755); err != nil {
+			return nil, fmt.Errorf("mkdir background-index-path: %w", err)
+		}
+		args = append(args, "--background-index-path="+opts.BackgroundIndexPath)
 	}
 	if opts.Jobs > 0 {
 		args = append(args, fmt.Sprintf("-j=%d", opts.Jobs))

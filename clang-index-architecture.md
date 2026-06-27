@@ -136,28 +136,26 @@ acceptable for a non-interactive backend. Restart is debounced (e.g. 5s) to
 coalesce rapid successive writes to the file.
 
 ### 6.2 Persisted background index
-clangd's `--background-index` flag (default `true`) makes it write shards
-to disk under `<compdb-dir>/.cache/clangd/index/`. The path is fixed by
-clangd — there is no flag to relocate it. On restart, clangd reuses
-those shards keyed by per-file content+command digest, so only changed
-or new files get re-indexed — most restarts become warm starts. A global
-compile-flag change still invalidates broadly, since the digest includes
-the command.
-
-Both `clang-index build` and `clangd-mcp-daemon` leave background
-indexing enabled by default; pass `--background-index=false` only if you
-want a truly disposable one-shot that leaves no `.cache/clangd/`
-directory behind.
+Run with `--background-index-path` pointed at a persistent location, not
+the default ephemeral path. On restart, clangd reuses on-disk shards keyed
+by per-file content+command digest, so only changed/new files get
+re-indexed — most restarts become warm starts. A global compile-flag
+change still invalidates broadly, since the digest includes the command.
+Opposite *default* from `clang-index build`'s pipeline, which discards
+its index cache after each run since that's framed as a disposable,
+isolated extraction. `clang-index build` may also opt into persisted
+shards by passing the same `--background-index-path` flag — useful when
+the binary is run iteratively (dev loop) rather than once (CI snapshot).
+The architectural policy is the same in both cases; only the default
+differs.
 
 This applies equally to both restart triggers the daemon has: a
 compdb-change-driven restart (§6.1) and a full daemon-process restart
 (redeploy, crash recovery). Neither is special-cased — both just spawn a
-fresh clangd against the same shard directory. The one precondition for
-either to actually be warm: that directory must be on persistent storage
-(in CI, that means caching `<compdb-dir>/.cache/clangd/index/` across
-runs; in production, not container-ephemeral storage). If it's ever
-wiped, both restart paths degrade to a cold start regardless of which
-one triggered it.
+fresh clangd against the same persistent index path. The one precondition
+for either to actually be warm: that path must be a real persistent
+volume, not container-ephemeral storage. If it's ever wiped, both restart
+paths degrade to a cold start regardless of which one triggered it.
 
 ### 6.3 Index growth and cleanup
 No confirmed automatic garbage collection for shards belonging to
@@ -223,9 +221,8 @@ The boost flag is typically the larger win — the throttled priority
 caps wall-clock throughput regardless of how many workers you allocate.
 On a dedicated CI box, both together (`--clangd-jobs=$(nproc)
 --clangd-boost`) is the default to reach for. Note that more
-concurrency increases disk I/O against clangd's shard directory
-(`<compdb-dir>/.cache/clangd/index/`); on slow storage that becomes
-the binding constraint before CPU does.
+concurrency increases disk I/O against `--background-index-path`; on
+slow storage that becomes the binding constraint before CPU does.
 
 ### 6.5 Function-pointer dispatch: facts, not synthesized edges
 clangd's `callHierarchy/outgoingCalls` only resolves direct calls — it
