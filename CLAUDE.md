@@ -65,6 +65,8 @@ Dependency map:
 14. **Never migrate, always rebuild.** Each extraction writes a fresh DB. The daemon's `Swap` atomically points the live handle at the new file. Don't add ALTER paths.
 15. **Edges with unresolved endpoints are dropped at write time**, not at extract time. Architecture §11 has an open question about external/unresolved symbols; if you add support, the dropping point is `store.WriteIndexWithFacts`.
 16. **`symbols.file` is relative to `ProjectRoot`** (§5.2). Don't store absolute paths; the artifact must be portable across build and serve environments.
+21. **Read-only enforcement for the `sql_query` MCP tool is at the driver, not in SQL parsing.** `store.Open` and `store.Swap` open SQLite with `?mode=ro`; the engine rejects every write, including `ATTACH`, temp-table `CREATE`, and `PRAGMA writable_schema=ON`. `store.QueryReadOnly` therefore does no statement classification — don't add one. The reason to keep enforcement at the engine: CTEs, recursive WITH, and PRAGMA expressions are arbitrarily nestable — parsing-based gates always leak. If you ever switch drivers, verify the replacement honors `mode=ro` the same way (`modernc.org/sqlite` does; CGo `mattn/go-sqlite3` does too).
+22. **`store.SchemaGuide` is part of the `describe_schema` contract.** It documents sentinel meanings (`decl_file=''` means same as `file`), enum values, and canonical join recipes that the agent has no other way to learn. A schema rename or semantic shift updates `schema.sql` *and* `schema.go`'s guide *and* the fencing test (`TestDescribeSchemaCarriesGuidance`) in one commit — same discipline as MCP tool descriptions (#12).
 
 ### Caching
 17. **Per-file cache key is `(file content digest, command digest)` over raw bytes — no normalization** (§7.2). Don't add whitespace stripping or sorting. The known gap (transitive header changes invisible to the key) is accepted; don't try to close it. Manual nuke is the documented fallback. Same applies after a schema/extraction change: a cached `tuPayload` from before today's run reflects the old extraction shape (e.g. missing `decl_file`, empty signatures, missing address_takes, `<init>` instead of field names); nuke the cache root after such changes (both `whole/` and `per-file/` subdirs share the same parent — `rm -rf` clears both at once).
@@ -73,6 +75,10 @@ Dependency map:
 ### Daemon
 19. **Restart over notify** (§6.1). Don't implement `workspace/didChangeWatchedFiles`. When compdb changes, the daemon debounces (5s) and restarts clangd. The new clangd reuses on-disk shards that clangd persists automatically under `<compdb-dir>/.cache/clangd/index/` (§6.2).
 20. **clangd's shard directory must survive restarts.** Path is fixed at `<compdb-dir>/.cache/clangd/index/` — clangd has no flag to relocate it; do not try to invent one (`--background-index-path` is not a real clangd flag and clangd will refuse to start). If that directory is container-ephemeral or wiped between CI runs, every restart cold-starts; the persistence policy in §6.2 then doesn't apply.
+
+## Looking up third-party package source
+
+To read the source of an imported Go package (e.g. to check a helper's signature in `github.com/mark3labs/mcp-go`), go directly to `$(go env GOMODCACHE)` — on this machine `~/go/pkg/mod/<module>@<version>/`. Don't `find /` or `find ~` — module cache paths include the version suffix, so a plain `grep -rn 'WithArray' ~/go/pkg/mod/github.com/mark3labs/` is fast and unambiguous.
 
 ## Testing
 

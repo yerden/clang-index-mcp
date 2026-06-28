@@ -172,6 +172,16 @@ func TestToolDescriptionsCarryAgentGuidance(t *testing.T) {
 		// is the InitList child position, not necessarily the actual array slot
 		// (multi-dim, designators, mixed positional/designator).
 		"Treat i as a hint, not a guaranteed array slot",
+		// sql_query: read-only enforcement is at the driver, not in SQL parsing.
+		"opened with SQLite ?mode=ro",
+		// sql_query: agent must know the row cap is a context-window guard,
+		// and that the response shape uses arrays-of-values, not objects.
+		"protects YOUR context window, not the DB",
+		"arrays-of-values (not objects)",
+		// sql_query: WITH RECURSIVE is the supported way to walk transitive graphs.
+		"WITH RECURSIVE is allowed",
+		// get_symbol must point at sql_query for ad-hoc shapes.
+		"For ad-hoc joins or shapes not covered by these tools",
 	}
 	for _, m := range must {
 		if !jsonContains(resp, escapeJSON(m)) {
@@ -187,6 +197,98 @@ func escapeJSON(s string) string {
 	b, _ := json.Marshal(s)
 	// strip the surrounding quotes
 	return string(b[1 : len(b)-1])
+}
+
+// TestDescribeSchemaCarriesGuidance fences the semantic-guide contract.
+// The guide is the agent's only documentation of sentinel meanings and
+// canonical joins; if a refactor drops a phrase, agents start emitting
+// wrong SQL (e.g. assuming decl_file is NULL when same as file).
+func TestDescribeSchemaCarriesGuidance(t *testing.T) {
+	srv := newTestServer(t)
+	resp, err := srv.HandleSingleMessage(context.Background(),
+		[]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"describe_schema","arguments":{}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	must := []string{
+		"RELATIVE to ProjectRoot",
+		"EMPTY STRING",
+		"MATCH, not LIKE",
+		"compared | arg_to | stored_in | array_init | assigned_to | returned_from | other",
+		"Does NOT carry the category prefix",
+		"WITH RECURSIVE",
+		// schema_sql echoes the embed verbatim
+		"CREATE TABLE symbols",
+		"CREATE TABLE call_edges",
+		"CREATE TABLE address_takes",
+		"CREATE TABLE indirect_call_sites",
+	}
+	for _, m := range must {
+		if !jsonContains(resp, escapeJSON(m)) {
+			t.Errorf("describe_schema missing phrase %q", m)
+		}
+	}
+}
+
+// TestSQLQueryReadOnly proves read works and writes are rejected by the
+// SQLite engine (no SQL parsing in our code).
+func TestSQLQueryReadOnly(t *testing.T) {
+	srv := newTestServer(t)
+
+	sel := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"sql_query","arguments":{"sql":"SELECT COUNT(*) AS n FROM symbols"}}}`)
+	resp, err := srv.HandleSingleMessage(context.Background(), sel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !jsonContains(resp, `\"columns\":[\"n\"]`) {
+		t.Errorf("expected columns=[n] in: %s", resp)
+	}
+	if !jsonContains(resp, `\"rows\":[[3]]`) {
+		t.Errorf("expected rows=[[3]] (three fixture symbols) in: %s", resp)
+	}
+
+	upd := []byte(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"sql_query","arguments":{"sql":"UPDATE symbols SET name='x' WHERE id=1"}}}`)
+	resp, err = srv.HandleSingleMessage(context.Background(), upd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !jsonContains(resp, "readonly") {
+		t.Errorf("expected readonly error: %s", resp)
+	}
+}
+
+// TestSQLQueryParamsAndTruncation covers param binding and the row cap.
+func TestSQLQueryParamsAndTruncation(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Param binding: filter by exact name.
+	q := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"sql_query","arguments":{"sql":"SELECT name FROM symbols WHERE name = ?","params":["alpha"]}}}`)
+	resp, err := srv.HandleSingleMessage(context.Background(), q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !jsonContains(resp, `\"rows\":[[\"alpha\"]]`) {
+		t.Errorf("expected rows=[[\"alpha\"]]: %s", resp)
+	}
+
+	// Truncation: fixture has 3 symbols; cap at 2 should truncate.
+	q = []byte(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"sql_query","arguments":{"sql":"SELECT id FROM symbols ORDER BY id","max_rows":2}}}`)
+	resp, err = srv.HandleSingleMessage(context.Background(), q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !jsonContains(resp, `\"truncated\":true`) {
+		t.Errorf("expected truncated=true: %s", resp)
+	}
+	// No truncation when cap > rows.
+	q = []byte(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"sql_query","arguments":{"sql":"SELECT id FROM symbols ORDER BY id","max_rows":100}}}`)
+	resp, err = srv.HandleSingleMessage(context.Background(), q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !jsonContains(resp, `\"truncated\":false`) {
+		t.Errorf("expected truncated=false: %s", resp)
+	}
 }
 
 func TestUnknownTool(t *testing.T) {

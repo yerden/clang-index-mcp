@@ -3,6 +3,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	_ "embed"
 	"fmt"
@@ -444,6 +445,66 @@ func (s *Store) GetIndirectCallSitesByCaller(callerID int64, exprPattern string,
 	}
 	defer rows.Close()
 	return scanIndirectCallSiteRows(rows)
+}
+
+// QueryReadOnly executes arbitrary SQL against the live DB handle and
+// returns the result as ordered column names + per-row value arrays.
+//
+// Enforcement is at the SQLite engine: Open/Swap use ?mode=ro, so any
+// write fails with "attempt to write a readonly database". No statement
+// classification or SQL parsing is done here — see CLAUDE.md invariant #21.
+//
+// Caller-supplied policy:
+//   - timeout: must be encoded in ctx via context.WithTimeout. modernc's
+//     driver honors cancellation via sqlite3_interrupt, so a runaway
+//     WITH RECURSIVE is actually killed inside SQLite, not just at the
+//     row-iterator level.
+//   - maxRows: rows beyond this are dropped and truncated=true. We scan
+//     up to maxRows and then check Next() one more time; the +1 probe
+//     distinguishes "exactly maxRows rows" from "more available" without
+//     rewriting the caller's SQL with a LIMIT (which would change the
+//     meaning of WITH RECURSIVE ... SELECT and lie about what ran).
+//
+// Concurrency with Swap: we snapshot s.db.Load() once. If Swap fires
+// mid-call, the old *sql.DB stays alive while our *sql.Rows is open
+// (Go database/sql refcounts the conn). The next call picks up the new
+// handle.
+func (s *Store) QueryReadOnly(ctx context.Context, sqlText string, params []any, maxRows int) (cols []string, rows [][]any, truncated bool, err error) {
+	if maxRows <= 0 {
+		maxRows = 500
+	}
+	db := s.db.Load()
+	if db == nil {
+		return nil, nil, false, fmt.Errorf("store: no DB open")
+	}
+	r, err := db.QueryContext(ctx, sqlText, params...)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	defer r.Close()
+	cols, err = r.Columns()
+	if err != nil {
+		return nil, nil, false, err
+	}
+	for r.Next() {
+		if len(rows) == maxRows {
+			truncated = true
+			break
+		}
+		scanDst := make([]any, len(cols))
+		scanPtr := make([]any, len(cols))
+		for i := range scanDst {
+			scanPtr[i] = &scanDst[i]
+		}
+		if err := r.Scan(scanPtr...); err != nil {
+			return cols, rows, truncated, err
+		}
+		rows = append(rows, scanDst)
+	}
+	if err := r.Err(); err != nil {
+		return cols, rows, truncated, err
+	}
+	return cols, rows, truncated, nil
 }
 
 // ListIndirectCallSites enumerates all indirect call sites, optionally

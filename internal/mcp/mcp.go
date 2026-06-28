@@ -8,10 +8,12 @@ package mcp
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	mcpsrv "github.com/mark3labs/mcp-go/server"
@@ -65,7 +67,8 @@ func (s *Server) registerTools() {
 				"\"Direct\" means clangd resolved the call to a concrete function statically — `foo(x)` where `foo` is a known function. "+
 				"Indirect calls (`fn(x)` where `fn` is a function-pointer parameter, variable, struct field, or array slot) are NOT in callers/callees here. "+
 				"If the symbol is a dispatcher (look for indirect calls in its body) and you need to know who it might invoke, call get_indirect_call_sites with this symbol's id; "+
-				"if you want to know who registers THIS symbol as a callback (the reverse), call get_address_take_sites with this symbol's id."),
+				"if you want to know who registers THIS symbol as a callback (the reverse), call get_address_take_sites with this symbol's id. "+
+				"For ad-hoc joins or shapes not covered by these tools (transitive callers, name-pattern aggregation), use sql_query — call describe_schema first."),
 			mcplib.WithNumber("id",
 				mcplib.Required(),
 				mcplib.Description("Symbol id, as returned by search_symbol."),
@@ -177,6 +180,48 @@ func (s *Server) registerTools() {
 		),
 		s.handleDescribeCategories,
 	)
+
+	s.mcp.AddTool(
+		mcplib.NewTool("describe_schema",
+			mcplib.WithDescription(
+				"Returns the SQLite schema of the index DB and a semantic guide for writing sql_query against it. Response shape:\n"+
+					"  { \"schema_sql\":  string,   // raw CREATE TABLE/INDEX (authoritative for column names/types)\n"+
+					"    \"guide\":       string,   // semantic layer: sentinel meanings, enum values, join recipes\n"+
+					"    \"categories\":  object }  // same structure as describe_address_take_categories\n"+
+					"Call this once before sql_query. The address_takes.category vocabulary is the same one returned by describe_address_take_categories — included here so a single call covers everything you need to write SQL against the index.\n\n"+
+					"Schema and guide are versioned together: a column rename or semantic shift updates both in one commit. If your SQL stops returning expected shapes after a daemon restart, re-call this — the underlying DB may have been rebuilt with a newer extraction."),
+		),
+		s.handleDescribeSchema,
+	)
+
+	s.mcp.AddTool(
+		mcplib.NewTool("sql_query",
+			mcplib.WithDescription(
+				"Execute a read-only SQL query against the index DB. The DB handle is opened with SQLite ?mode=ro, so writes (INSERT/UPDATE/DELETE/ALTER/ATTACH/PRAGMA writable_schema=ON) fail at the engine with 'attempt to write a readonly database' — no SQL parsing is done here, the guarantee is at the driver level.\n\n"+
+					"Call describe_schema first for table/column semantics, sentinel meanings (decl_file='' means same as file), enum values, and canonical join recipes.\n\n"+
+					"Response shape:\n"+
+					"  { \"columns\":    [string],   // column names in result order\n"+
+					"    \"rows\":       [[any]],   // row values in `columns` order; NULL → null; BLOB → base64 string\n"+
+					"    \"truncated\":  bool,      // true if max_rows was hit — rewrite (COUNT/GROUP BY/narrower WHERE) rather than page\n"+
+					"    \"elapsed_ms\": number }\n"+
+					"Rows are arrays-of-values (not objects) to preserve column order and to keep duplicate column names (e.g. `SELECT a.id, b.id`) from clobbering each other.\n\n"+
+					"Use ? placeholders bound via `params` (positional, in order) rather than interpolating into `sql` — avoids escaping issues and lets the SQLite query planner cache the plan.\n\n"+
+					"Limits — the row cap protects YOUR context window, not the DB:\n"+
+					"  - max_rows:   default 500, max 5000. If truncated=true, prefer rewriting the query (COUNT(*), GROUP BY, narrower WHERE) over paging.\n"+
+					"  - timeout_ms: default 5000, max 30000. Enforced via SQLite interrupt — kills runaway WITH RECURSIVE before it exhausts memory.\n\n"+
+					"WITH RECURSIVE is allowed and is how you walk the call graph transitively. The timeout is the bound — there is no separate recursion-depth cap. Temp tables / ATTACH / CTE-INSERT are blocked by ?mode=ro.\n\n"+
+					"Error messages from SQLite are surfaced verbatim (syntax errors, no-such-column, readonly violations) — read and self-correct."),
+			mcplib.WithString("sql", mcplib.Required(),
+				mcplib.Description("SQL SELECT, WITH ... SELECT, or read-only PRAGMA (e.g. 'PRAGMA table_info(symbols)'). Writes fail at the engine.")),
+			mcplib.WithArray("params",
+				mcplib.Description("Optional positional params for ? placeholders. Bind types: JSON number → INTEGER/REAL, string → TEXT, null → NULL, bool → INTEGER 0/1.")),
+			mcplib.WithNumber("max_rows",
+				mcplib.Description("Row cap (default 500, max 5000). On hit, truncated=true.")),
+			mcplib.WithNumber("timeout_ms",
+				mcplib.Description("Per-query timeout in milliseconds (default 5000, max 30000).")),
+		),
+		s.handleSQLQuery,
+	)
 }
 
 func (s *Server) handleSearchSymbol(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
@@ -269,10 +314,80 @@ func (s *Server) handleGetIndirectCallSites(ctx context.Context, req mcplib.Call
 }
 
 func (s *Server) handleDescribeCategories(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-	return jsonResult(map[string]any{
+	return jsonResult(categoriesPayload())
+}
+
+func categoriesPayload() map[string]any {
+	return map[string]any{
 		"precedence_order": extract.AddressTakeCategoryPrecedence(),
 		"categories":       extract.AddressTakeCategoryDescriptors(),
 		"prose":            extract.AddressTakeCategoryVocabulary,
+	}
+}
+
+func (s *Server) handleDescribeSchema(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+	return jsonResult(map[string]any{
+		"schema_sql": store.SchemaSQL(),
+		"guide":      store.SchemaGuide,
+		"categories": categoriesPayload(),
+	})
+}
+
+const (
+	sqlDefaultMaxRows = 500
+	sqlMaxMaxRows     = 5000
+	sqlDefaultTimeout = 5 * time.Second
+	sqlMaxTimeout     = 30 * time.Second
+)
+
+func (s *Server) handleSQLQuery(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+	args := req.GetArguments()
+	sqlText, ok := args["sql"].(string)
+	if !ok || sqlText == "" {
+		return mcplib.NewToolResultError("sql is required and must be a string"), nil
+	}
+	maxRows := sqlDefaultMaxRows
+	if v, ok := args["max_rows"].(float64); ok && v > 0 {
+		maxRows = int(v)
+		if maxRows > sqlMaxMaxRows {
+			maxRows = sqlMaxMaxRows
+		}
+	}
+	timeout := sqlDefaultTimeout
+	if v, ok := args["timeout_ms"].(float64); ok && v > 0 {
+		timeout = time.Duration(v) * time.Millisecond
+		if timeout > sqlMaxTimeout {
+			timeout = sqlMaxTimeout
+		}
+	}
+	var params []any
+	if raw, ok := args["params"].([]any); ok {
+		params = raw
+	}
+
+	qctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	start := time.Now()
+	cols, rows, truncated, err := s.store.QueryReadOnly(qctx, sqlText, params, maxRows)
+	elapsed := time.Since(start)
+	if err != nil {
+		// Surface the SQLite message verbatim — readonly violations, syntax
+		// errors, no-such-column all carry useful detail the agent can act on.
+		return mcplib.NewToolResultError("sql_query: " + err.Error()), nil
+	}
+	for i := range rows {
+		for j, v := range rows[i] {
+			if b, ok := v.([]byte); ok {
+				rows[i][j] = base64.StdEncoding.EncodeToString(b)
+			}
+		}
+	}
+	return jsonResult(map[string]any{
+		"columns":    cols,
+		"rows":       rows,
+		"truncated":  truncated,
+		"elapsed_ms": elapsed.Milliseconds(),
 	})
 }
 
