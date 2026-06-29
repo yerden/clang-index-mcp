@@ -143,6 +143,14 @@ func runBuild(args []string) int {
 			waitCtx, cancel := context.WithTimeout(c, *indexTimeout)
 			defer cancel()
 			if err := proc.WaitIndexed(waitCtx); err != nil {
+				// Outer-ctx cancellation (SIGINT) must surface so extract
+				// bails — otherwise we'd silently continue, write a
+				// partial DB, and cache it as a "successful" build.
+				// An inner-timeout exhaustion (waitCtx but not c) keeps
+				// the old "degrade to whatever clangd has so far" path.
+				if c.Err() != nil {
+					return c.Err()
+				}
 				fmt.Fprintln(os.Stderr, "build: warning: index-settle wait:", err)
 			}
 			return nil

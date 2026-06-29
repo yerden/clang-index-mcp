@@ -369,6 +369,12 @@ func Run(ctx context.Context, cli *lsp.Client, opts Options) (*Result, error) {
 	if firstErr != nil {
 		return nil, firstErr
 	}
+	// Workers and the dispatch loop bail silently on workCtx cancellation
+	// (no setErr), so without this check Run would return a partial result
+	// with err==nil — and main.go would write that to the whole-build cache.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	out := &Result{
 		Edges:             edges,
